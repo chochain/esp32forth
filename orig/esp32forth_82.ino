@@ -446,8 +446,8 @@ public:
 ///==========================================================================
 /// ESP32 Web Serer connection and index page
 ///==========================================================================
-const char* ssid = "Frontier7008";
-const char* pass = "8551666595";
+const char* ssid = "SVFIG";
+const char* pass = "12345678";
 
 WebServer server(80);
 
@@ -471,7 +471,7 @@ static const char *index_html =
 "</head>\n"
 "<body>\n"
 "    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;\n"
-"         background-color:#f8f0f0;'>ESP32Forth</div>\n"
+"         background-color:#f8f0f0;'><h2>ESP32Forth</h2></div>\n"
 "    <textarea id='tib' style='height:600px;width:400px;'\n"
 "        onkeydown='if (13===event.keyCode) forth()'>words</textarea>\n"
 "</body>\n"
@@ -491,9 +491,9 @@ static const char *index_html =
 "}\n"
 "function forth() {\n"
 "    log.innerHTML+='<font color=blue>'+tib.value+'<br/></font>'\n"
-"    httpPost('/input', { cmd: tib.value + '\\n' },function(rst) {\n"
-"        if (rst !== null) {\n"
-"            log.innerHTML += rst.replace(/\\n/g, '<br/>').replace(/\\s/g,'&nbsp;')\n"
+"    httpPost('/input', { cmd: tib.value + '\\n' },function(rsp) {\n"
+"        if (rsp !== null) {\n"
+"            log.innerHTML += rsp.replace(/\\n/g, '<br/>').replace(/\\s/g,'&nbsp;')\n"
 "            log.scrollTop=log.scrollHeight }})\n"
 "    tib.value = ''\n"
 "}\n"
