@@ -26,42 +26,41 @@ WebServer server(80);
 #define LED_PIN            5
 #define BRIGHTNESS         255    // how bright the LED is
 
-static const char *index_html =
-"<html><head><meta charset='UTF-8'><title>esp32forth</title>\n"
-"<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>\n"
-"</head>\n"
-"<body>\n"
-"    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;\n"
-"         background-color:#f8f0f0;'>\n"
-"    </div>\n"
-"    <textarea id='tib' style='height:600px;width:400px;'\n"
-"        onkeydown='if (13===event.keyCode) forth()'>ESP32Forth</textarea>\n"
-"</body>\n"
-"<script>\n"
-"let log = document.getElementById('log')\n"
-"let tib = document.getElementById('tib')\n"
-"function httpPost(url, items, callback) {\n"
-"    let fd = new FormData()\n"
-"    for (k in items) { fd.append(k, items[k]) }\n"
-"    let r = new XMLHttpRequest()\n"
-"    r.onreadystatechange = function() {\n"
-"        if (this.readyState != XMLHttpRequest.DONE) return\n"
-"        callback(this.status===200 ? this.responseText : null)\n"
-"    }\n"
-"    r.open('POST', url)\n"
-"    r.send(fd)\n"
-"}\n"
-"function forth() {\n"
-"    log.innerHTML+='<font color=blue>'+tib.value+'<br/></font>'\n"
-"    httpPost('/input', { cmd: tib.value + '\\n' },function(rst) {\n"
-"        if (rst !== null) {\n"
-"            log.innerHTML += rst.replace(/\\n/g, '<br/>').replace(/\\s/g,'&nbsp;')\n"
-"            log.scrollTop=log.scrollHeight }})\n"
-"    tib.value = ''\n"
-"}\n"
-"window.onload = ()=>{ tib.focus() }\n"
-"</script></html>\n"
-;
+static const char *index_html PROGMEM = R"XX(
+<html><head><meta charset='UTF-8'><title>esp32forth</title>
+<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
+</head>
+<body>
+    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
+         background-color:#f8f0f0;'>ESP32Forth 8.02</div>
+    <textarea id='tib' style='height:600px;width:400px;'
+        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
+</body>
+<script>
+let log = document.getElementById('log')
+let tib = document.getElementById('tib')
+function httpPost(url, items, callback) {
+    let fd = new FormData()
+    for (k in items) { fd.append(k, items[k]) }
+    let r = new XMLHttpRequest()
+    r.onreadystatechange = function() {
+        if (this.readyState != XMLHttpRequest.DONE) return
+        callback(this.status===200 ? this.responseText : null) }
+    r.open('POST', url)
+    r.send(fd) }
+function chunk(ary, d) {                        // recursive call to sequence POSTs
+    req = ary.slice(0,40).join('\n')            // 40*(average 50 byte/line) ~= 2K
+    if (req=='' || d>30) return                 // bail looping, just in case
+    log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
+    httpPost('/input', { cmd: req }, rsp=>{
+        if (rsp !== null) {
+            log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
+            log.scrollTop=log.scrollHeight      // scroll down
+            chunk(ary.splice(40), d+1) }})}     // next 300 tokens
+function forth() { chunk(tib.value.split('\n'), 1); tib.value = '' }
+window.onload = ()=>{ tib.focus() }
+</script></html>
+)XX";
 
 istringstream forth_in;
 ostringstream forth_out;
@@ -149,12 +148,14 @@ void setup() {
 
     // Setup web server handlers
     server.on("/", HTTP_GET, []() {
-            server.send(200, "text/html", index_html);
-        });
+        server.send(200, "text/html", index_html);
+    });
     server.on("/input", HTTP_POST, handleInput);
     server.begin();
     Serial.println("HTTP server started");
-    
+    ///
+    /// ForthVM initalization
+    ///
     forth_vm->init();
     forth_load("/load.txt");    // compile \data\load.txt  
 }
