@@ -1,39 +1,26 @@
 /******************************************************************************/
 /* esp32Forth, Version 8.2: for NodeMCU ESP32S                                */
 /******************************************************************************/
-/* 16jun25cht  _63                                                            */
-/* web server                                                                 */
-/* 16jun19cht  _62                                                            */
-/* structures                                                                 */
-/* 14jun19cht  _61                                                            */
-/* macro assembler with labels                                                */
-/* 10may19cht  _54                                                            */
-/* robot tests                                                                */
-/* 21jan19cht  _51                                                            */
-/* 8 channel electronic organ                                                 */
-/* 15jan19cht  _50                                                            */
-/* Clean up for AIR robot                                                     */
-/* 03jan19cht  _47-49                                                         */
-/* Move to ESP32                                                              */
-/* 07jan19cht  _46                                                            */
-/* delete UDP                                                                 */
-/* 03jan19cht  _45                                                            */
-/* Move to NodeMCU ESP32S Kit                                                 */
-/* 18jul17cht  _44                                                            */
-/* Byte code sequencer                                                        */
-/* 14jul17cht  _43                                                            */
-/* Stacks in circular buffers                                                 */
-/* 01jul17cht  _42                                                            */
-/* Compiled as an Arduino sketch                                              */
-/* 20mar17cht  _41                                                            */
-/* Compiled as an Arduino sketch                                              */
+/* 31aug21ccl/cht  _82   c++, web page                                        */
+/* 16jun20cht  _63       web server                                           */
+/* 16jun19cht  _62       structures                                           */
+/* 14jun19cht  _61       macro assembler with labels                          */
+/* 10may19cht  _54       robot tests                                          */
+/* 21jan19cht  _51       8 channel electronic organ                           */
+/* 15jan19cht  _50       Clean up for AIR robot                               */
+/* 03jan19cht  _47-49    Move to ESP32                                        */
+/* 07jan19cht  _46       delete UDP                                           */
+/* 03jan19cht  _45       Move to NodeMCU ESP32S Kit                           */
+/* 18jul17cht  _44       Byte code sequencer                                  */
+/* 14jul17cht  _43       Stacks in circular buffers                           */
+/* 01jul17cht  _42       Compiled as an Arduino sketch                        */
+/* 20mar17cht  _41       Compiled as an Arduino sketch                        */
 /* Follow the ceForth model with 64 primitives                                */
 /* Serial Monitor at 115200 baud                                              */
 /* Send and receive UDP packets in parallel with Serial Monitor               */
 /* Case insensitive interpreter                                               */
 /* data[] must be filled with rom42.h eForth dictionary                       */
-/* 22jun17cht                                                                 */
-/* Stacks are 256 cell circular buffers, with byte pointers R and S           */
+/* 22jun17cht Stacks are 256 cell circular buffers, byte pointers R and S     */
 /* All references to R and S are forced to (unsigned char)                    */
 /* All multiply-divide words cleaned up                                       */
 /******************************************************************************/
@@ -43,7 +30,7 @@
 #include <functional>       // function
 #include <exception>        // try...catch, throw
 #include "SPIFFS.h"         // flash memory
-#include <WebServer.h>    
+#include <WebServer.h>
 using namespace std;        // default namespace to std
 ///
 /// macros for portability
@@ -92,7 +79,7 @@ public:
     Code(string n, bool f=false) { name = n; if (f) token = fence++; }
     Code(Code *c, int v) { name = c->name; xt = c->xt; qf.push(v); }
     Code(Code *c, string s=string()) { name = c->name; xt = c->xt; if (s.size()>0) literal = s;  }
-    
+
     Code* addcode(Code* w) { pf.push(w);   return this; }
     string to_s()          { return name + " " + to_string(token) + (immd ? "*" : ""); }
     string see(int dp) {
@@ -133,15 +120,15 @@ typedef unsigned int U32;
 /// Forth Virtual Machine class
 ///
 class ForthVM {
-    istream          &cin;                  /// stream input
-    ostream          &cout;                 /// stream output
+    istream          &cin;                /// stream input
+    ostream          &cout;               /// stream output
     ForthList<int> rs;                    /// return stack
     ForthList<int> ss;                    /// parameter stack
-    ForthList<Code*> dict;                  /// dictionary
-    bool  compile = false;                  /// compiling flag
-    int   base    = 10;                     /// numeric radix
-    int   WP      = 0;                      /// instruction and parameter pointers
-    int top     = 0;                   /// cached top of stack
+    ForthList<Code*> dict;                /// dictionary
+    bool  compile = false;                /// compiling flag
+    int   base    = 10;                   /// numeric radix
+    int   WP      = 0;                    /// instruction and parameter pointers
+    int   top     = 0;                    /// cached top of stack
     inline int POP()         { int n = top; top = ss.pop(); return n; }
     inline int PUSH(int v) { ss.push(top); return top = v; }
     /// search dictionary reversely
@@ -151,8 +138,7 @@ class ForthVM {
         return NULL; }
     string next_idiom(char delim=0) {
         string s; delim ? getline(cin, s, delim) : cin >> s; return s; }
-    void dot_r(int n, int v) {
-        cout << setw(n) << setfill(' ') << v; }
+    void dot_r(int n, int v) { cout << setw(n) << setfill(' ') << v; }
     void ss_dump() {
         cout << " <"; for (int i : ss.v) { cout << i << " "; }
         cout << top << "> ok" << ENDL; }
@@ -175,7 +161,7 @@ class ForthVM {
 public:
     ForthVM(istream &in, ostream &out) : cin(in), cout(out) {}
     void init() {
-        static vector<Code*> prim = {                      /// singleton, built at compile time
+        static vector<Code*> prim = {                      /// singleton, built once
         ///
         /// @defgroup Stack ops
         /// @{
@@ -206,6 +192,9 @@ public:
         CODE("/",    top =  ss.pop() / top),
         CODE("mod",  top =  ss.pop() % top),
         CODE("*/",   top =  ss.pop() * ss.pop() / top),
+        CODE("/mod",
+             int n = ss.pop(); int t = top;
+             ss.push(n % t); top = (n / t)),
         CODE("*/mod",
              int n = ss.pop() * ss.pop();
              int t = top;
@@ -215,6 +204,13 @@ public:
         CODE("xor",  top = ss.pop() ^ top),
         CODE("abs",  top = abs(top)),
         CODE("negate", top = -top),
+        CODE("abs",  top = abs(top)),
+        CODE("max",  int n=ss.pop();top = (top>n)?top:n),
+        CODE("min",  int n=ss.pop();top = (top<n)?top:n),
+        CODE("2*",   top *= 2),
+        CODE("2/",   top /= 2),
+        CODE("1+",   top += 1),
+        CODE("1-",   top -= 1),
         /// @}
         /// @defgroup Logic ops
         /// @{
@@ -279,7 +275,7 @@ public:
                  last->pf.merge(temp->pf);
                  dict.pop(); }
              else {                                      // if...else...then, or
-                 last->pf1.merge(temp->pf);             // for...aft...then...next
+                 last->pf1.merge(temp->pf);              // for...aft...then...next
                  if (last->stage == 1) dict.pop();
                  else temp->pf.clear(); }),
         /// @}
@@ -341,7 +337,7 @@ public:
         CODE("exit", int x = top; throw domain_error(string())),   // need x=top, Arduino bug
         CODE("exec", int n = top; call(dict[n])),
         CODE(":",
-             dict.push(new Code(next_idiom(), true));               // create new word
+             dict.push(new Code(next_idiom(), true));              // create new word
              compile = true),
         IMMD(";", compile = false),
         CODE("variable",
@@ -358,7 +354,7 @@ public:
         CODE("?",      int w = POP(); cout << dict[w]->pf[0]->qf[0] << " "),// w --
         CODE("array@", int a = POP(); PUSH(dict[POP()]->pf[0]->qf[a])),     // w a -- n
         CODE("array!", int a = POP(); int w = POP();  dict[w]->pf[0]->qf[a] = POP()),   // n w a --
-        CODE("allot",                                           // n --
+        CODE("allot",                                            // n --
              for (int n = POP(), i = 0; i < n; i++) dict[-1]->pf[0]->qf.push(0)),
         CODE(",",      dict[-1]->pf[0]->qf.push(POP())),
         /// @}
@@ -373,10 +369,10 @@ public:
              ForthList<Code*> &src = dict[WP]->pf;               // source word : xx create...does...;
              int n = src.size();
              while (Code::IP < n) dict[-1]->pf.push(src[Code::IP++])),       // copy words after "does" to new the word
-        CODE("to",                                              // n -- , compile only
+        CODE("to",                                               // n -- , compile only
              Code *tgt = find(next_idiom());
              if (tgt) tgt->pf[0]->qf[0] = POP()),                // update constant
-        CODE("is",                                              // w -- , execute only
+        CODE("is",                                               // w -- , execute only
              Code *tgt = find(next_idiom());
              if (tgt) {
                  tgt->pf.clear();
@@ -388,7 +384,7 @@ public:
         /// @}
         /// @defgroup Debug ops
         /// @{
-        CODE("bye",   exit(0)),
+        CODE("bye",   exit(0)),                                  // reboot ESP32
         CODE("here",  PUSH(dict[-1]->token)),
         CODE("words", words()),
         CODE(".s",    ss_dump()),
@@ -411,23 +407,23 @@ public:
         CODE("in",    PUSH(digitalRead(POP()))),
         CODE("out",   int p = POP(); digitalWrite(p, POP())),
         CODE("adc",   PUSH(analogRead(POP()))),
-        CODE("pwm",   int p = POP(); analogWrite(p, POP(), 255)),
+        CODE("duty",  int p = POP(); analogWrite(p, POP(), 255)),
         CODE("attach",int p  = POP(); ledcAttachPin(p, POP())),
         CODE("setup", int ch = POP(); int freq=POP(); ledcSetup(ch, freq, POP())),
         CODE("tone",  int ch = POP(); ledcWriteTone(ch, POP())),
         /// @}
         CODE("boot", dict.erase(Code::fence=find("boot")->token + 1))
         };
-        dict.v = prim;                                      /// * populate dictionary
+        dict.v = prim;                                  /// * populate dictionary
     }
     void outer() {
         string idiom;
         while (cin >> idiom) {
-            Code *w = find(idiom);                          /// * search through dictionary
-            if (w) {                                        /// * word found?
-                if (compile && !w->immd)                    /// * in compile mode?
-                    dict[-1]->addcode(w);                   /// * add to colon word
-                else call(w);                               /// * execute forth word
+            Code *w = find(idiom);                      /// * search through dictionary
+            if (w) {                                    /// * word found?
+                if (compile && !w->immd)                /// * in compile mode?
+                    dict[-1]->addcode(w);               /// * add to colon word
+                else call(w);                           /// * execute forth word
                 continue; }
             // try as a number
             char *p;
@@ -435,7 +431,7 @@ public:
             if (*p != '\0') {                           /// * not number
                 cout << idiom << "? " << ENDL;          ///> display error prompt
                 compile = false;                        ///> reset to interpreter mode
-                ss.clear(); top=0; 
+                ss.clear(); top=0;
                 break; }
             // is a number
             if (compile)                                /// * a number in compile mode?
@@ -446,8 +442,8 @@ public:
 ///==========================================================================
 /// ESP32 Web Serer connection and index page
 ///==========================================================================
-const char* ssid = "SVFIG";
-const char* pass = "12345678";
+const char *ssid = "Sonic-6af4";
+const char *pass = "7b369c932f";
 
 WebServer server(80);
 
@@ -465,41 +461,41 @@ WebServer server(80);
 #define LED_PIN            5
 #define BRIGHTNESS         255    // how bright the LED is
 
-static const char *index_html =
-"<html><head><meta charset='UTF-8'><title>esp32forth</title>\n"
-"<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>\n"
-"</head>\n"
-"<body>\n"
-"    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;\n"
-"         background-color:#f8f0f0;'><h2>ESP32Forth</h2></div>\n"
-"    <textarea id='tib' style='height:600px;width:400px;'\n"
-"        onkeydown='if (13===event.keyCode) forth()'>words</textarea>\n"
-"</body>\n"
-"<script>\n"
-"let log = document.getElementById('log')\n"
-"let tib = document.getElementById('tib')\n"
-"function httpPost(url, items, callback) {\n"
-"    let fd = new FormData()\n"
-"    for (k in items) { fd.append(k, items[k]) }\n"
-"    let r = new XMLHttpRequest()\n"
-"    r.onreadystatechange = function() {\n"
-"        if (this.readyState != XMLHttpRequest.DONE) return\n"
-"        callback(this.status===200 ? this.responseText : null)\n"
-"    }\n"
-"    r.open('POST', url)\n"
-"    r.send(fd)\n"
-"}\n"
-"function forth() {\n"
-"    log.innerHTML+='<font color=blue>'+tib.value+'<br/></font>'\n"
-"    httpPost('/input', { cmd: tib.value + '\\n' },function(rsp) {\n"
-"        if (rsp !== null) {\n"
-"            log.innerHTML += rsp.replace(/\\n/g, '<br/>').replace(/\\s/g,'&nbsp;')\n"
-"            log.scrollTop=log.scrollHeight }})\n"
-"    tib.value = ''\n"
-"}\n"
-"window.onload = ()=>{ tib.focus() }\n"
-"</script></html>\n"
-;
+static const char *index_html PROGMEM = R"XX(
+<html><head><meta charset='UTF-8'><title>esp32forth</title>
+<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
+</head>
+<body>
+    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
+         background-color:#f8f0f0;'>ESP32Forth 8.02</div>
+    <textarea id='tib' style='height:600px;width:400px;'
+        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
+</body>
+<script>
+let log = document.getElementById('log')
+let tib = document.getElementById('tib')
+function httpPost(url, items, callback) {
+    let fd = new FormData()
+    for (k in items) { fd.append(k, items[k]) }
+    let r = new XMLHttpRequest()
+    r.onreadystatechange = function() {
+        if (this.readyState != XMLHttpRequest.DONE) return
+        callback(this.status===200 ? this.responseText : null) }
+    r.open('POST', url)
+    r.send(fd) }
+function chunk(ary, d) {                        // recursive call to sequence POSTs
+    req = ary.slice(0,40).join('\n')            // 40*(average 50 byte/line) ~= 2K
+    if (req=='' || d>30) return                 // bail looping, just in case
+    log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
+    httpPost('/input', { cmd: req }, rsp=>{
+        if (rsp !== null) {
+            log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
+            log.scrollTop=log.scrollHeight      // scroll down
+            chunk(ary.splice(40), d+1) }})}     // next 300 tokens
+function forth() { chunk(tib.value.split('\n'), 1); tib.value = '' }
+window.onload = ()=>{ tib.focus() }
+</script></html>
+)XX";
 ///==========================================================================
 /// ForthVM front-end handlers
 ///==========================================================================
@@ -532,7 +528,7 @@ static int forth_load(const char *fname) {
         Serial.println("<< "+cmd);  // display bootstrap command on console
         // send it to Forth command processor
         process_command(cmd); }
-    Serial.println("Done loading."); 
+    Serial.println("Done loading.");
     file.close();
     SPIFFS.end();
     return 0;
@@ -581,13 +577,13 @@ void setup() {
     ledcAttachPin(5, 0);
     analogWrite(0, 250, BRIGHTNESS);
     pinMode(2,OUTPUT);
-    digitalWrite(2, HIGH);   // turn the LED2 on 
+    digitalWrite(2, HIGH);   // turn the LED2 on
     pinMode(16,OUTPUT);
     digitalWrite(16, LOW);   // motor1 forward
     pinMode(17,OUTPUT);
-    digitalWrite(17, LOW);   // motor1 backward 
+    digitalWrite(17, LOW);   // motor1 backward
     pinMode(18,OUTPUT);
-    digitalWrite(18, LOW);   // motor2 forward 
+    digitalWrite(18, LOW);   // motor2 forward
     pinMode(19,OUTPUT);
     digitalWrite(19, LOW);   // motor2 bacward
     // Setup web server handlers
