@@ -493,8 +493,11 @@ function chunk(ary, d) {                        // recursive call to sequence PO
         if (rsp !== null) {
             log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
             log.scrollTop=log.scrollHeight      // scroll down
-            chunk(ary.splice(40), d+1) }})}     // next 300 tokens
-function forth() { chunk(tib.value.split('\n'), 1); tib.value = '' }
+            chunk(ary.splice(40), d+1) }})}     // next 40 lines
+function forth() { 
+    let str = tib.value.split(/(\(\s[^\)]+\))/)
+    let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
+    chunk(cmd.split('\n'), 1); tib.value = '' }
 window.onload = ()=>{ tib.focus() }
 </script></html>
 )XX";
