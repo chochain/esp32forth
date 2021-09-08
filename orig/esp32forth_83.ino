@@ -24,11 +24,13 @@
 /* All references to R and S are forced to (unsigned char)                    */
 /* All multiply-divide words cleaned up                                       */
 /******************************************************************************/
+#include <memory>           // shared_ptr, make_shared 
 #include <sstream>          // iostream, stringstream, string
 #include <iomanip>          // setw, setbase, ...
 #include <vector>           // vector
 #include <functional>       // function
 #include <exception>        // try...catch, throw
+#include <string.h>         // strcasecmp
 #include "SPIFFS.h"         // flash memory
 #include <WebServer.h>
 using namespace std;        // default namespace to std
@@ -82,7 +84,7 @@ public:
     ~Code() { pf.clear(); pf1.clear(); pf2.clear(); qf.clear(); }         // free allocated memory
     Code& addcode(CodeP w) { pf.push(w);   return *this; }
     string to_s()          { return name + " " + to_string(token) + (immd ? "*" : ""); }
-    string see(int dp) {
+    string see(int dp=0) {
         stringstream cout("");
         auto see_pf = [&cout](int dp, string s, ForthList<CodeP>& pf) {   // lambda for indentation and recursive dump
             int i = dp; cout << ENDL; while (i--) cout << "  "; cout << s;
@@ -130,18 +132,22 @@ class ForthVM {
     ForthList<int>   ss;                  /// parameter stack
     ForthList<CodeP> dict;                /// dictionary
     bool  compile = false;                /// compiling flag
+    int   ucase   = 1;                    /// case sensitive control
     int   base    = 10;                   /// numeric radix
     int   WP      = 0;                    /// instruction and parameter pointers
     int   top     = 0;                    /// cached top of stack
+    string idiom; 
     inline int POP()         { int n = top; top = ss.pop(); return n; }
     inline int PUSH(int v) { ss.push(top); return top = v; }
+    inline int STREQ(string& s1, string& s2) {
+        return ucase ? strcasecmp(s1.c_str(), s2.c_str())==0 : s1==s2; }
     /// search dictionary reversely
     CodeP find(string s) {
-        for (int i = dict.size() - 1; i >= 0; --i) {
-            if (s == dict[i]->name) return dict[i]; }
+        for (int i = dict.size() - (compile ? 2 : 1); i >= 0; --i) {
+            if (STREQ(s, dict[i]->name)) return dict[i]; }
         return NULL; }
-    string next_idiom(char delim=0) {
-        string s; delim ? getline(cin, s, delim) : cin >> s; return s; }
+    string& next_idiom(char delim=0) {
+        delim ? getline(cin, idiom, delim) : cin >> idiom; return idiom; }
     void dot_r(int n, int v) { cout << setw(n) << setfill(' ') << v; }
     void ss_dump() {
         cout << " <"; for (int i : ss.v) { cout << i << " "; }
@@ -163,7 +169,8 @@ class ForthVM {
     void call(ForthList<CodeP>& pf) {
         for (int i=0, n=pf.size(); i<n; i++) call(pf[i]); }
 public:
-    ForthVM(istream &in, ostream &out) : cin(in), cout(out) {}
+    ForthVM(istream &in, ostream &out)
+        : cin(in), cout(out), idiom(string("", 256)) {}
     void init() {
         dict.v = {                      /// TODO: singleton, built once (=>ROM)
         ///
@@ -393,7 +400,7 @@ public:
         CODE("'",     CodeP w = find(next_idiom()); PUSH(w->token)),
         CODE("see",
              CodeP w = find(next_idiom());
-             if (w) cout << w->see(0) << ENDL),
+             if (w) cout << w->see() << ENDL),
         CODE("forget",
              CodeP w = find(next_idiom());
              if (w == NULL) return;
@@ -402,6 +409,7 @@ public:
         CODE("delay", delay(POP())),
         CODE("peek",  int a = POP(); PUSH(PEEK(a))),
         CODE("poke",  int a = POP(); POKE(a, POP())),
+        CODE("ucase", ucase = POP()),
         /// @}
         /// @defgroup Arduino specific ops
         /// @{
@@ -419,7 +427,6 @@ public:
         };
     }
     void outer() {
-        string idiom;
         while (cin >> idiom) {
             CodeP w = find(idiom);                      /// * search through dictionary
             if (w) {                                    /// * word found?
@@ -486,14 +493,14 @@ function httpPost(url, items, callback) {
     r.open('POST', url)
     r.send(fd) }
 function chunk(ary, d) {                        // recursive call to sequence POSTs
-    req = ary.slice(0,40).join('\n')            // 40*(average 50 byte/line) ~= 2K
-    if (req=='' || d>30) return                 // bail looping, just in case
+    req = ary.slice(0,30).join('\n')            // 30*(average 50 byte/line) ~= 1.5K
+    if (req=='' || d>20) return                 // bail looping, just in case
     log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
     httpPost('/input', { cmd: req }, rsp=>{
         if (rsp !== null) {
             log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
             log.scrollTop=log.scrollHeight      // scroll down
-            chunk(ary.splice(40), d+1) }})}     // next 40 lines
+            chunk(ary.splice(30), d+1) }})}     // next 30 lines
 function forth() { 
     let str = tib.value.split(/(\(\s[^\)]+\))/)
     let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
@@ -605,13 +612,14 @@ void setup() {
 }
 
 void loop(void) {
-    server.handleClient();     // ESP32 handle web requests
-    delay(2);                  // yield to background tasks (interrupt, timer,...)
+    server.handleClient(); // ESP32 handle web requests
+    delay(2);              // yield to background tasks (interrupt, timer,...)
     ///
     /// while Web requests come in from handleInput asynchronously,
     /// we also take user input from console (for debugging mostly)
     ///
     if (Serial.available()) {
         String cmd = Serial.readString();
-        Serial.print(process_command(cmd)); }  // check! might not be thread-safe
+        Serial.print(process_command(cmd));
+        delay(2); }         // check! might not be thread-safe
 }
