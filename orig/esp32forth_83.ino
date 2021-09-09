@@ -65,7 +65,7 @@ using fop   = function<void(Code&)>;        /// Forth functor
 using CodeP = shared_ptr<Code>;             /// C++ managed smart pointer
 class Code {
 public:
-    static int fence, IP;                   /// token incremental counter
+    static int fence, IP, maxbss;           /// token incremental counter
     string name;                            /// name of word
     int    token = 0;                       /// dictionary order token
     bool   immd  = false;                   /// immediate flag
@@ -97,13 +97,16 @@ public:
         cout << "]";
         return cout.str(); }
     void  nest() {
+        int tmp = IP;
+        int off = (int)((unsigned char*)&tmp - pxTaskGetStackStart(NULL));
+        if (off > Code::maxbss) Code::maxbss = off;
         if (xt) { xt(*this); return; }
-        int tmp = IP, n = pf.size(); IP = 0;             /// * or, setup call frame
+        int n = pf.size(); IP = 0;                       /// * or, setup call frame
         while (IP < n) { yield(); pf[IP++]->nest(); }    /// * and run inner interpreter
         IP = tmp; }                                      /// * resture call frame
 };
 /// initialize static variables
-int Code::fence = 0, Code::IP = 0;
+int Code::fence = 0, Code::IP = 0, Code::maxbss = 0;
 ///
 /// macros to reduce verbosity (but harder to single-step debug)
 ///
@@ -502,7 +505,7 @@ function chunk(ary, d) {                        // recursive call to sequence PO
             log.scrollTop=log.scrollHeight      // scroll down
             chunk(ary.splice(30), d+1) }})}     // next 30 lines
 function forth() { 
-    let str = tib.value.split(/(\(\s[^\)]+\))/)
+    let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
     let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
     chunk(cmd.split('\n'), 1); tib.value = '' }
 window.onload = ()=>{ tib.focus() }
@@ -545,6 +548,22 @@ static int forth_load(const char *fname) {
     SPIFFS.end();
     return 0;
 }
+///
+/// memory statistics dump - for heap and stack debugging
+///
+static void mem_stat() {
+    Serial.print("Core:");          Serial.print(xPortGetCoreID());
+    Serial.print(" heap[maxblk=");  Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    Serial.print(", avail=");        Serial.print(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    Serial.print(", maxbss=");       Serial.print(Code::maxbss);
+    Serial.print("], lowest[heap="); Serial.print(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    Serial.print(", stack=");        Serial.print(uxTaskGetStackHighWaterMark(NULL));
+    Serial.println("]");
+    if (!heap_caps_check_integrity_all(true)) {
+//        heap_trace_dump();     // dump memory, if we have to
+        abort();                 // bail, on any memory error
+    }
+}
 ///==========================================================================
 /// Web Server handlers
 ///==========================================================================
@@ -556,10 +575,11 @@ static void handleInput() {
     }
     // retrieve command from web server
     String cmd = server.arg("cmd");
-    Serial.println(">> "+cmd);          // display requrest on console
+    Serial.print("\n>> "+cmd);          // display requrest on console
     // send requrest command to Forth command processor, and receive response
     String rsp = process_command(cmd);
     Serial.print(rsp);                  // display response on console
+    mem_stat();
     // send response back to web browser
     server.setContentLength(rsp.length());
     server.send(200, "text/plain; charset=utf-8", rsp);
@@ -621,5 +641,6 @@ void loop(void) {
     if (Serial.available()) {
         String cmd = Serial.readString();
         Serial.print(process_command(cmd));
+        mem_stat();
         delay(2); }         // check! might not be thread-safe
 }
