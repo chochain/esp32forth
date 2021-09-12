@@ -110,8 +110,8 @@ int Code::fence = 0, Code::IP = 0, Code::maxbss = 0;
 ///
 /// macros to reduce verbosity (but harder to single-step debug)
 ///
-#define CODE(s, g) make_shared<Code>(string(s), [this](Code& c){ g; })
-#define IMMD(s, g) make_shared<Code>(string(s), [this](Code& c){ g; }, true)
+#define CODE(s, g) make_shared<Code>(s, [this](Code& c){ g; })
+#define IMMD(s, g) make_shared<Code>(s, [this](Code& c){ g; }, true)
 #define WORD()     make_shared<Code>(next_idiom(), true)
 #define LIT(s,l)   make_shared<Code>(find(s), (l))
 #define BRAN(s)    make_shared<Code>(find(s))
