@@ -25,9 +25,11 @@ typedef uint8_t  U8;    // byte, unsigned character
 ///
 template<class T, int N>
 struct List {
-    T   v[N];           /// fixed-size array storage
+    T   *v;             /// fixed-size array storage
     int idx = 0;        /// current index of array
-
+    
+    List()  { v = new T[N]; }
+    ~List() { delete[] v;   }
     T& operator[](int i)   { return i < 0 ? v[idx + i] : v[i]; }
     T pop() {
         if (idx>0) return v[--idx];
@@ -84,10 +86,10 @@ struct Code {
 ///   * this makes IP increment by 2 instead of word size. If needed, it can be
 ///   * readjusted.
 ///
-List<DU,   64>      ss;   /// data stack, can reside in registers for some processors
-List<DU,   64>      rs;   /// return stack
-List<Code, 1024>    dict; /// fixed sized dictionary (RISC vs CISC)
-List<U8,   64*1024> pmem; /// parameter memory i.e. storage for all colon definitions
+List<DU,   64>       ss;   /// data stack, can reside in registers for some processors
+List<DU,   64>       rs;   /// return stack
+List<Code, 1024>     dict; /// fixed sized dictionary (RISC vs CISC)
+List<U8,   108*1024> pmem; /// parameter memory i.e. storage for all colon definitions
 ///
 /// system variables
 ///
@@ -548,7 +550,6 @@ void forth_init() {
         Serial.print(","); Serial.println(b, HEX);
         dict.push(prim[i]);                 /// find() can be modified to support
     }                                       /// searching both spaces
-    words();
 }
 ///
 /// outer interpreter
