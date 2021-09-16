@@ -67,7 +67,7 @@ struct Code {
             U16 def:  1;    /// colon defined word
             U16 immd: 1;    /// immediate flag
             U16 len:  14;   /// len of pf
-            IU  pf;         /// offset to pmem space (16-bit for 64K range)
+            IU  pfa;        /// offset to pmem space (16-bit for 64K range)
         };
     };
     template<typename F>    /// template function for lambda
@@ -98,6 +98,31 @@ bool compile = false;
 DU   top = -1, base = 10;
 IU   WP = 0, IP = 0;
 ///
+/// macros to abstract dict and pmem access
+/// Note:
+///   so we can change pmem implementation anytime without affecting opcodes defined below
+///
+#define STRLEN(s) (ALIGN(strlen(s)+1))              /** calculate string size with alignment     */
+#define XIP       (dict[-1].len)                    /** parameter field tail of latest word      */
+#define PFA       (dict[WP].pfa+IP+sizeof(IU))      /** get parameter field of current word      */
+#define CELL(a)   (*(DU*)&pmem[a])                  /** fetch a cell from parameter memory       */
+#define HALF(a)   (*(U16*)&pmem[a])                 /** fetch half a cell from parameter memory  */
+#define BYTE(a)   (*(U8*)&pmem[a])                  /** fetch a byte from parameter memory       */
+#define STR(a)    ((char*)&pmem[a])                 /** fetch string pointer to parameter memory */
+#define SETJMP(a) (*(IU*)&pmem[dict[-1].pfa + (a)]) /** address offset for branching opcodes     */
+#define JMPIP     (*(IU*)&pmem[PFA] - sizeof(IU))   /** get jump target address                  */
+#define HERE      (pmem.idx)                        /** current parameter memory index           */
+///
+/// inline functions to reduce verbosity (and abstraction)
+///
+inline IU   NEXT_OP() { IU w=*(IU*)&pmem[dict[WP].pfa + IP]; IP+=sizeof(IU); return w; }  /** fetch next word (for nest)   */
+inline void ADD_IU(IU i)   { pmem.push((U8*)&i, sizeof(IU)); XIP+=sizeof(IU); } /** add an instruction into pmem */
+inline void ADD_DU(DU v)   { pmem.push((U8*)&v, sizeof(DU)), XIP+=sizeof(DU); } /** add a cell into pmem         */
+inline void ADD_STR(const char *s) {                                            /** add a string to pmem         */
+    int sz = STRLEN(s); pmem.push((U8*)s,  sz); XIP += sz;
+}
+inline void ADD_WORD(const char *s) { ADD_IU(find(s)); }                        /** find a word and add to pmem  */
+///
 /// dictionary search functions - can be adapted for ROM+RAM
 ///
 int find(const char *s) {
@@ -113,43 +138,31 @@ int find(const char *s) {
 ///   * if they are combined then can behaves similar to classic Forth
 ///   * with an addition link field added.
 ///
-#define XIP  (dict[-1].len)                 /* end of pf */
 void colon(const char *name) {
-    const char *nfd = (const char*)&pmem[pmem.idx];      // current pmem pointer
-    int sz = ALIGN(strlen(name)+1);         // IU (16-bit) alignment
-    pmem.push((U8*)name, sz);               // setup raw name field
-    Code c(nfd, [](int){});                 // create a new word on dictionary
+    char *nfa = STR(HERE);                  // current pmem pointer
+    ADD_STR(name);                          // setup raw name field
+    Code c(nfa, [](int){});                 // create a new word on dictionary
     c.def = 1;                              // specify a colon word
     c.len = 0;                              // advance counter (by number of U16)
-    c.pf  = pmem.idx;                       // capture code field index
-    dict.push(c);                           // copy Code struct into dictionary
+    c.pfa = HERE;                           // capture code field index
+    dict.push(c);                           // deep copy Code struct into dictionary
 };
-void addcode(IU c) {
-    pmem.push((U8*)&c, sizeof(IU));         // add an opcode to pf
-    XIP += sizeof(IU);                      // advance by instruction size
-}
 void addvar() {                             // add a dovar (variable)
     DU n = 0;                               // default variable value
-    addcode(find("dovar"));                 // dovar (+parameter field)
-    pmem.push((U8*)&n, sizeof(DU));         // data storage (32-bit integer now)
-    XIP += sizeof(DU);                      // skip to next field
+    ADD_WORD("dovar");                      // dovar (+parameter field)
+    ADD_DU(n);                              // data storage (32-bit integer now)
 }
 void addlit(DU n) {                         // add a dolit (constant)
-    addcode(find("dolit"));                 // dovar (+parameter field)
-    pmem.push((U8*)&n, sizeof(DU));         // data storage (32-bit integer now)
-    XIP += sizeof(DU);                      // skip to next field
+    ADD_WORD("dolit");                      // dovar (+parameter field)
+    ADD_DU(n);                              // data storage (32-bit integer now)
 }
 void adddotstr(const char *s) {             // print a string
-    int sz = ALIGN(strlen(s)+1);            // IU (16-bit) alignment
-    addcode(find("dotstr"));                // dostr, (+parameter field)
-    pmem.push((U8*)s, sz);                  // byte0, byte1, byte2, ..., byteN
-    XIP += sz;                              // skip to next field
+    ADD_WORD("dotstr");                     // dostr, (+parameter field)
+    ADD_STR(s);                             // byte0, byte1, byte2, ..., byteN
 }
 void addstr(const char *s) {                // add a string
-    int sz = ALIGN(strlen(s)+1);            // IU (16-bit) alignment
-    addcode(find("dostr"));                 // dostr, (+parameter field)
-    pmem.push((U8*)s, sz);                  // byte0, byte1, byte2, ..., byteN
-    XIP += sz;                              // skip to next field
+    ADD_WORD("dostr");                      // dostr, (+parameter field)
+    ADD_STR(s);                             // byte0, byte1, byte2, ..., byteN
 }
 ///
 /// Forth inner interpreter
@@ -168,9 +181,8 @@ void nest(IU c) {
     if (rs.idx > rs_max) rs_max = rs.idx;   // keep rs sizing matrics
     try {
         while (IP < dict[c].len) {          // in instruction range
-            nest(pmem[dict[c].pf + IP]);    // fetch/exec instruction from pmem space
-            IP += sizeof(IU);               // advance to next instruction by 2
-        }                                   // can be IP++ if pmem unit is 16-bit
+            nest(NEXT_OP());                // fetch/exec instruction from code field
+        }
     }
     catch(...) {}
     IP = rs.pop(); WP = rs.pop();           // restore call frame
@@ -210,7 +222,7 @@ void mem_dump(IU p0, U16 sz) {
     fout << setbase(16) << setfill('0');
     for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=0x20) {
         fout << setw(4) << i << ':';
-        U8 *p = &pmem[i];
+        char *p = STR(i);
         for (int j=0; j<0x20; j++) {
             fout << setw(2) << (U16)*(p+j);
             if ((j%4)==3) fout << ' ';
@@ -244,8 +256,8 @@ static void mem_stat() {
     Serial.print("Core:");          Serial.print(xPortGetCoreID());
     Serial.print(" heap[maxblk=");  Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     Serial.print(", avail=");        Serial.print(heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    Serial.print(", maxbss=");       Serial.print(maxbss);
-    Serial.print(", pmem=");         Serial.print(pmem.idx);
+    Serial.print(", rs_max=");       Serial.print(rs_max);
+    Serial.print(", pmem=");         Serial.print(HERE);
     Serial.print("], lowest[heap="); Serial.print(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
     Serial.print(", stack=");        Serial.print(uxTaskGetStackHighWaterMark(NULL));
     Serial.println("]");
@@ -257,22 +269,15 @@ static void mem_stat() {
 ///
 /// macros to reduce verbosity
 ///
-inline void WORD()     { fin >> strbuf; colon(strbuf.c_str()); }  // create a colon word
-inline char *SCAN(c)   { getline(fin, strbuf, c); return strbuf.c_str(); }
-inline DU   PUSH(DU v) { ss.push(top); return top = v;         }
-inline DU   POP()      { DU n=top; top=ss.pop(); return n;     }
-#define     CODE(s, g) { s, [&](IU c){ g; }, 0 }
-#define     IMMD(s, g) { s, [&](IU c){ g; }, 1 }
-#define     BOOL(f)    ((f)?-1:0)
+inline void NEW_WORD()    { fin >> strbuf; colon(strbuf.c_str()); }  // create a colon word
+inline char *SCAN(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
+inline DU   PUSH(DU v)    { ss.push(top); return top = v;         }
+inline DU   POP()         { DU n=top; top=ss.pop(); return n;     }
+#define     CODE(s, g)    { s, [&](IU c){ g; }, 0 }
+#define     IMMD(s, g)    { s, [&](IU c){ g; }, 1 }
+#define     BOOL(f)       ((f)?-1:0)
 ///
-/// macros to abstract pmem access
-///
-#define     PFID       (dict[WP].pf+IP+sizeof(IU))  /* get parameter field index */
-#define     CELL(a)    (*(DU*)&pmem[a])
-#define     HALF(a)    (*(U16*)&pem[a])
-#define     BYTE(a)    (*&pem[a])
-///
-/// global memory access
+/// global memory access macros
 ///
 #define     PEEK(a)    (DU)(*(DU*)((uintptr_t)(a)))
 #define     POKE(a, c) (*(DU*)((uintptr_t)(a))=(DU)(c))
@@ -369,13 +374,14 @@ static Code prim[] PROGMEM = {
     /// @}
     /// @defgroup Literal ops
     /// @{
-    CODE("dovar",   PUSH(PFID); IP += sizeof(DU)),
-    CODE("dolit",   PUSH(CELL(PFID)); IP += sizeof(DU)),
-    CODE("dostr",   PUSH(PFID); IP += ALIGN(strlen(s)+1)),
+    CODE("dovar",   PUSH(PFA);       IP += sizeof(DU)),
+    CODE("dolit",   PUSH(CELL(PFA)); IP += sizeof(DU)),
+    CODE("dostr",
+        const char *s = STR(PFA);           // get string pointer
+        PUSH(PFA); IP += STRLEN(s)),        // put string pfa on stack
     CODE("dotstr",
-        const char *s = (char*)&pmem[PFID]; // get string pointer
-        fout << s;                          // send to output console
-        IP += ALIGN(strlen(s)+1)),          // advance to next instruction
+        const char *s = STR(PFA);           // get string pointer
+        fout << s;  IP += STRLEN(s)),       // send to output console
     CODE("[",       compile = false),
     CODE("]",       compile = true),
     IMMD("(",       SCAN(')')),
@@ -388,83 +394,67 @@ static Code prim[] PROGMEM = {
     /// @brief - if...then, if...else...then
     /// @{
     CODE("exit",    throw " "),
-    CODE("branch" , IP = (IU)pmem[PFID] - sizeof(IU)),
-    CODE("0branch", IP = POP() ? IP + sizeof(IU) : (IU)pmem[PFID] - sizeof(IU)),
-    CODE("donext" , DU i = rs.pop() - 1;
-         if (i<0) IP += sizeof(IU);
-         else { IP = (IU)pmem[PFID] - sizeof(IU); rs.push(i); }),
-    IMMD("if",      addcode(find("0branch")); PUSH(XIP); addcode(0)), // if    ( -- here ) 
-    IMMD("else",                                                      // else ( here -- there )
-        addcode(find("branch"));      
-        IU h=XIP;   addcode(0); pmem[dict[-1]->pf + POP()]=XIP; PUSH(h)),
-    IMMD("then",    pmem[dict[-1]->pf + POP()]=XIP),
+    CODE("branch" , IP = JMPIP),
+    CODE("0branch", IP = POP() ? IP + sizeof(IU) : JMPIP),
+    CODE("donext" ,
+         DU i = rs.pop() - 1;                                    // decrement counter
+         if (i<0) { IP += sizeof(IU);       }                    // break
+         else     { IP = JMPIP; rs.push(i); }),                  // loop back
+    IMMD("if",      ADD_WORD("0branch"); PUSH(XIP); ADD_IU(0)),  // if    ( -- here ) 
+    IMMD("else",                                                 // else ( here -- there )
+        ADD_WORD("branch");
+        IU h=XIP;   ADD_IU(0); SETJMP(POP()) = XIP; PUSH(h)),
+    IMMD("then",    SETJMP(POP()) = XIP),
     /// @}
     /// @defgroup Loops
     /// @brief  - begin...again, begin...f until, begin...f while...repeat
     /// @{
     IMMD("begin",   PUSH(XIP)),
-    IMMD("again",   addcode(find("branch")); addcode(POP())),          // again    ( there -- ) 
-    IMMD("until",   addcode(find("0branch")); addcode(POP())),         // until    ( there -- ) 
-    IMMD("while",   addcode(find("0branch")); PUSH(XIP); addcode(0)),  // while    ( there -- there here ) 
-    IMMD("repeat",  addcode(find("branch"));                           // repeat    ( there1 there2 -- ) 
-        IU t=POP(); addcode(POP()); pmem[dict[-1]->pf + t]=XIP),
+    IMMD("again",   ADD_WORD("branch");  ADD_IU(POP())),         // again    ( there -- ) 
+    IMMD("until",   ADD_WORD("0branch"); ADD_IU(POP())),         // until    ( there -- ) 
+    IMMD("while",   ADD_WORD("0branch"); PUSH(XIP); ADD_IU(0)),  // while    ( there -- there here ) 
+    IMMD("repeat",  ADD_WORD("branch");                          // repeat    ( there1 there2 -- ) 
+        IU t=POP(); ADD_IU(POP()); SETJMP(t) = XIP),             // set forward and loop back address
     /// @}
     /// @defgrouop For loops
     /// @brief  - for...next, for...aft...then...next
     /// @{
-    IMMD("for" ,    addcode(find(">r")); PUSH(XIP)),                    // for ( -- here )
-    IMMD("next",    addcode(find("donext")); addcode(POP())),           // next ( here -- )
-    IMMD("aft",     POP(); addcode(find("branch"));                     // aft ( here -- here there )
-        IU h=XIP; addcode(0); PUSH(XIP); PUSH(h)),
+    IMMD("for" ,    ADD_WORD(">r"); PUSH(XIP)),                  // for ( -- here )
+    IMMD("next",    ADD_WORD("donext"); ADD_IU(POP())),          // next ( here -- )
+    IMMD("aft",     POP(); ADD_WORD("branch");                   // aft ( here -- here there )
+        IU h=XIP; ADD_IU(0); PUSH(XIP); PUSH(h)),
     /// @}
     /// @defgrouop Compiler ops
     /// @{
-    CODE(":",        WORD(); compile=true),
-    IMMD(";",        compile = false),
-    CODE("create",   WORD();
-         addcode(find("dovar"));                             // dovar (+parameter field) 
-         XIP += sizeof(DU)),                                 // skip to next field
-    CODE("variable", WORD(); addvar()),
-    CODE("constant", WORD(); addlit(POP())),
-    CODE("c@",    IU w = POP(); PUSH(BYTE(w));),             // w -- n
+    CODE(":",       NEW_WORD(); compile=true),
+    IMMD(";",       compile = false),
+    CODE("create",  NEW_WORD();
+         ADD_WORD("dovar");                                      // dovar (+parameter field) 
+         XIP -= sizeof(DU)),                                     // skip to next field
+    CODE("variable",NEW_WORD(); addvar()),
+    CODE("constant",NEW_WORD(); addlit(POP())),
+    CODE("c@",    IU w = POP(); PUSH(BYTE(w));),                 // w -- n
     CODE("c!",    IU w = POP(); BYTE(w) = POP()),
-    CODE("w@",    IU w = POP(); PUSH(HALF(w))),              // w -- n
+    CODE("w@",    IU w = POP(); PUSH(HALF(w))),                  // w -- n
     CODE("w!",    IU w = POP(); HALF(w) = POP()),
-    CODE("@",     IU w = POP(); PUSH(CELL(w))),              // w -- n
-    CODE("!",     IU w = POP(); CELL(w) = POP();),           // n w --
-    CODE("+!",    IU w = POP(); CELL(w) += POP()),           // n w --
-    CODE("?",     IU w = POP(); fout << CELL(w) << " "),     // w --
-    CODE("array@",IU a = POP()*sizeof(DU); IU w = POP(); PUSH(CELL(w+a))),   // w a -- n
-    CODE("array!",IU a = POP()*sizeof(DU); IU w = POP(); CELL(w+a) = POP()), // n w a --
-    CODE("allot", DU v = 0;                                  // n --
-        for (IU n = POP(), i = 0; i < n; i++) pmem.push((U8*)&v, sizeof(DU))),
-    CODE(",",     DU i = POP(); pmem.push((U8*)&i, sizeof(DU))),
+    CODE("@",     IU w = POP(); PUSH(CELL(w))),                  // w -- n
+    CODE("!",     IU w = POP(); CELL(w) = POP();),               // n w --
+    CODE("+!",    IU w = POP(); CELL(w) += POP()),               // n w --
+    CODE("?",     IU w = POP(); fout << CELL(w) << " "),         // w --
+    CODE("allot", DU v = 0; for (IU n = POP(), i = 0; i < n; i++) ADD_DU(v)), // n --
+    CODE(",",     DU i = POP(); ADD_DU(i)),
     /// @}
     /// @defgroup metacompiler
     /// @{
     CODE("'",     IU w = find(SCAN(' ')); PUSH(w)),
-#if 0
-    CODE("does",
-        ForthList<CodeP>& src = dict[WP]->pf;               // source word : xx create...does...;
-        int n = src.size();
-        while (Code::IP < n) dict[-1]->pf.push(src[Code::IP++])),       // copy words after "does" to new the word
-    CODE("to",                                              // n -- , compile only
-        CodeP tgt = find(next_idiom());
-        if (tgt) tgt->pf[0]->qf[0] = POP()),                // update constant
-    CODE("is",                                              // w -- , execute only
-        CodeP tgt = find(next_idiom());
-        if (tgt) {
-            tgt->pf.clear();
-            tgt->pf.merge(dict[POP()]->pf);
-        }),
-    CODE("[to]",
-        ForthList<CodeP>& src = dict[WP]->pf;               // source word : xx create...does...;
-        src[Code::IP++]->pf[0]->qf[0] = POP()),             // change the following constant
-#endif
+    CODE("does",  /* TODO */),
+    CODE("to",    /* TODO */),
+    CODE("is",    /* TODO */),
+    CODE("[to]",  /* TODO */),
     /// @}
     /// @defgroup Debug ops
     /// @{
-    CODE("here",  PUSH(pmem.idx)),
+    CODE("here",  PUSH(HERE)),
     CODE("words", words()),
     CODE(".s",    ss_dump()),
     CODE("see",   see(find(SCAN(' ')))),
@@ -491,16 +481,16 @@ static Code prim[] PROGMEM = {
     CODE("tone",  DU ch = POP(); ledcWriteTone(ch, POP())),
     /// @}
     CODE("bye",   exit(0)),
-    CODE("boot",  dict.clear(find("boot") + 1))
+    CODE("boot",  dict.clear(find("boot") + 1); pmem.clear())
 };
 const int PSZ = sizeof(prim)/sizeof(Code);
 ///
 /// dictionary initialization
 ///
 void forth_init() {
-    for (int i=0; i<PSZ; i++) {             /// copy prim(ROM) into RAM dictionary,
-        dict.push(prim[i]);                 /// find() can be modified to support
-    }                                       /// searching both spaces
+    for (int i=0; i<PSZ; i++) {              /// copy prim(ROM) into RAM dictionary,
+        dict.push(prim[i]);                  /// find() can be modified to support
+    }                                        /// searching both spaces
     words();
 }
 ///
@@ -510,31 +500,30 @@ void forth_outer() {
     while (fin >> strbuf) {
         const char *idiom = strbuf.c_str();
         printf("%s=>", idiom);
-        int w = find(idiom);           /// * search through dictionary
-        if (w>=0) {                                 /// * word found?
+        int w = find(idiom);                 /// * search through dictionary
+        if (w>=0) {                          /// * word found?
             printf("%s\n", dict[w].name);
-            if (compile && !dict[w].immd) {         /// * in compile mode?
-                addcode(w);                         /// * add to colon word
+            if (compile && !dict[w].immd) {  /// * in compile mode?
+                ADD_IU(w);                   /// * add found word to new colon word
             }
-            else nest(w);                           /// * execute forth word
+            else nest(w);                    /// * execute forth word
             continue;
         }
         // try as a number
         char *p;
         int n = static_cast<int>(strtol(idiom, &p, base));
         printf("%d\n", n);
-        if (*p != '\0') {                           /// * not number
-            fout << idiom << "? " << ENDL;          ///> display error prompt
-            compile = false;                        ///> reset to interpreter mode
+        if (*p != '\0') {                    /// * not number
+            fout << idiom << "? " << ENDL;   ///> display error prompt
+            compile = false;                 ///> reset to interpreter mode
             ss.clear(0); top = -1;
-            break;                                  ///> skip the entire input buffer
+            break;                           ///> skip the entire input buffer
         }
         // is a number
-        if (compile) addlit(n);                     /// * add literal when in compile mode
-        else PUSH(n);                               ///> or, add value onto data stack
+        if (compile) addlit(n);              /// * add literal when in compile mode
+        else PUSH(n);                        ///> or, add value onto data stack
     }
     if (!compile) ss_dump();
-    return 1;
 }
 ///
 /// translate ESP32 String to/from Forth input/output streams (in C++ string)
@@ -578,7 +567,7 @@ void setup() {
     digitalWrite(19, LOW);   // motor2 bacward
 
     forth_init();
-    Serial.println("\nesp32forth8 experimental 3");
+    Serial.println("\nesp32forth8 experimental 5");
     mem_stat();
 }
 
