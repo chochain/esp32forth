@@ -4,7 +4,7 @@
 #include <stdint.h>     // uintxx_t
 #include <stdlib.h>     // strtol
 #include <string.h>     // strcmp
-#include <exception>    // try...catch, throw
+#include <exception>    // try...catch, throw (disable for less capable MCU)
 ///
 /// logical units (instead of physical) for type check and portability
 ///
@@ -22,14 +22,15 @@ typedef uint8_t  U8;    // byte, unsigned character
 /// Note:
 ///   * using decorator pattern
 ///   * this is similar to vector class but much simplified
+///   * v array is dynamically allocated due to ESP32 has a 96K hard limit
 ///
 template<class T, int N>
 struct List {
     T   *v;             /// fixed-size array storage
     int idx = 0;        /// current index of array
     
-    List()  { v = new T[N]; }
-    ~List() { delete[] v;   }
+    List()  { v = new T[N]; }      /// dynamically allocate array memory
+    ~List() { delete[] v;   }      /// free the memory
     T& operator[](int i)   { return i < 0 ? v[idx + i] : v[i]; }
     T pop() {
         if (idx>0) return v[--idx];
@@ -66,7 +67,7 @@ struct Code {
             U16 def:  1;    /// colon defined word
             U16 immd: 1;    /// immediate flag
             U16 len:  14;   /// len of pf
-            IU  pf;         /// offset to pmem space
+            IU  pf;         /// offset to pmem space (16-bit for 64K range)
         };
     };
     template<typename F>    /// template function for lambda
@@ -74,7 +75,7 @@ struct Code {
         xt = new XT<F>(f);
         immd = im ? 1 : 0;
     }
-    Code() {}               /// create a blank struct
+    Code() {}               /// create a blank struct (for initilization)
 };
 ///
 /// main storages in RAM
@@ -86,16 +87,16 @@ struct Code {
 ///   * this makes IP increment by 2 instead of word size. If needed, it can be
 ///   * readjusted.
 ///
-List<DU,   64>       ss;   /// data stack, can reside in registers for some processors
-List<DU,   64>       rs;   /// return stack
-List<Code, 1024>     dict; /// fixed sized dictionary (RISC vs CISC)
-List<U8,   108*1024> pmem; /// parameter memory i.e. storage for all colon definitions
+List<DU,   64>      ss;   /// data stack, can reside in registers for some processors
+List<DU,   64>      rs;   /// return stack
+List<Code, 1024>    dict; /// fixed sized dictionary (RISC vs CISC)
+List<U8,   64*1024> pmem; /// parameter memory i.e. storage for all colon definitions
 ///
 /// system variables
 ///
 bool compile = false;
-DU  top = -1, base = 10;
-IU  WP = 0, IP = 0;
+DU   top = -1, base = 10;
+IU   WP = 0, IP = 0;
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
 ///
@@ -112,6 +113,7 @@ int find(const char *s) {
 ///   * if they are combined then can behaves similar to classic Forth
 ///   * with an addition link field added.
 ///
+#define XIP  (dict[-1].len)                 /* end of pf */
 void colon(const char *name) {
     const char *nfd = (const char*)&pmem[pmem.idx];      // current pmem pointer
     int sz = ALIGN(strlen(name)+1);         // IU (16-bit) alignment
@@ -124,29 +126,35 @@ void colon(const char *name) {
 };
 void addcode(IU c) {
     pmem.push((U8*)&c, sizeof(IU));         // add an opcode to pf
-    dict[-1].len += sizeof(IU);             // advance by instruction size
+    XIP += sizeof(IU);                      // advance by instruction size
 }
 void addvar() {                             // add a dovar (variable)
     DU n = 0;                               // default variable value
     addcode(find("dovar"));                 // dovar (+parameter field)
     pmem.push((U8*)&n, sizeof(DU));         // data storage (32-bit integer now)
-    dict[-1].len += sizeof(DU);             // skip to next field
+    XIP += sizeof(DU);                      // skip to next field
 }
 void addlit(DU n) {                         // add a dolit (constant)
     addcode(find("dolit"));                 // dovar (+parameter field)
     pmem.push((U8*)&n, sizeof(DU));         // data storage (32-bit integer now)
-    dict[-1].len += sizeof(DU);             // skip to next field
+    XIP += sizeof(DU);                      // skip to next field
 }
-void addstr(const char *s) {                // add a string
+void adddotstr(const char *s) {             // print a string
     int sz = ALIGN(strlen(s)+1);            // IU (16-bit) alignment
     addcode(find("dotstr"));                // dostr, (+parameter field)
     pmem.push((U8*)s, sz);                  // byte0, byte1, byte2, ..., byteN
-    dict[-1].len += sz;                     // skip to next field
+    XIP += sz;                              // skip to next field
+}
+void addstr(const char *s) {                // add a string
+    int sz = ALIGN(strlen(s)+1);            // IU (16-bit) alignment
+    addcode(find("dostr"));                 // dostr, (+parameter field)
+    pmem.push((U8*)s, sz);                  // byte0, byte1, byte2, ..., byteN
+    XIP += sz;                              // skip to next field
 }
 ///
 /// Forth inner interpreter
 ///
-int maxbss = 0;
+int rs_max = 0;                             // rs watermark
 void nest(IU c) {
     ///
     /// by not using any temp variable here can prevent auto stack allocation
@@ -157,7 +165,7 @@ void nest(IU c) {
     }
     // is a colon words
     rs.push(WP); rs.push(IP); WP=c; IP=0;   // setup call frame
-    if (rs.idx > maxbss) maxbss = rs.idx;   // keep rs sizing matrics
+    if (rs.idx > rs_max) rs_max = rs.idx;   // keep rs sizing matrics
     try {
         while (IP < dict[c].len) {          // in instruction range
             nest(pmem[dict[c].pf + IP]);    // fetch/exec instruction from pmem space
@@ -168,42 +176,34 @@ void nest(IU c) {
     IP = rs.pop(); WP = rs.pop();           // restore call frame
 }
 ///
-/// utilize C++ standard template libraries for core functions only
+/// utilize C++ standard template libraries for core IO functions only
+/// Note:
+///   * we use STL for its convinence, but
+///   * if it takes too much memory for target MCU,
+///   * these functions can be replaced with our own implementation
 ///
 #include <sstream>      // iostream, stringstream
 #include <iomanip>      // setbase
 #include <string>       // string class
-using namespace std;
+using namespace std;    // default to C++ standard template library
 istringstream   fin;    // forth_in
 ostringstream   fout;   // forth_out
 string strbuf;          // input string buffer
 ///
 /// Arduino specific macros
 ///
-#define to_string(i)    string(String(i).c_str())
+#define to_string(i)        string(String(i).c_str())
 #define analogWrite(c,v,mx) ledcWrite((c),(8191/mx)*min((int)(v),mx))
-#define ENDL    endl
-///
-/// get token from input stream
-///
-const char *next_idiom(char delim=0) {
-	strbuf.clear();
-    delim ? getline(fin, strbuf, delim) : fin >> strbuf;
-    const char *s = strbuf.length() ? strbuf.c_str() : NULL;
-    return s;
-}
+#define ENDL                endl
 ///
 /// debug functions
 ///
-void dot_r(int n, DU v) {
-    fout << setw(n) << setfill(' ') << v;
-}
+void dot_r(int n, int v) { fout << setw(n) << setfill(' ') << v; }
 void to_s(IU c) {
     fout << dict[c].name << " " << c << (dict[c].immd ? "* " : " ");
 }
 void ss_dump() {
-    fout << " <";
-    for (int i=0; i<ss.idx; i++) { fout << ss[i] << " "; }
+    fout << " <"; for (int i=0; i<ss.idx; i++) { fout << ss[i] << " "; }
     fout << top << "> ok" << ENDL;
 }
 void mem_dump(IU p0, U16 sz) {
@@ -212,30 +212,29 @@ void mem_dump(IU p0, U16 sz) {
         fout << setw(4) << i << ':';
         U8 *p = &pmem[i];
         for (int j=0; j<0x20; j++) {
-        	fout << setw(2) << (U16)*(p+j);
-        	if ((j%4)==3) fout << ' ';
+            fout << setw(2) << (U16)*(p+j);
+            if ((j%4)==3) fout << ' ';
         }
         fout << ' ';
         for (int j=0; j<0x20; j++) {   // print and advance to next byte
             char c = *(p+j) & 0x7f;
             fout << (char)((c==0x7f||c<0x20) ? '_' : c);
         }
-    	fout << ENDL;
+        fout << ENDL;
     }
-    fout << setbase(10);
+    fout << setbase(base);
 }
 void see(IU c, int dp=0) {
-	if (c<0) return;
-	to_s(c);
-	if (!dict[c].def) return;
-	for (int n=dict[c].len, i=0; i<n; i+=sizeof(IU)) {
+    if (c<0) return;
+    to_s(c);
+    if (!dict[c].def) return;
+    for (int n=dict[c].len, i=0; i<n; i+=sizeof(IU)) {
         // TODO:
     }
 }
 void words() {
     for (int i=0; i<dict.idx - 1; i--) {
-        if ((i%10)==0) fout << ENDL;
-        fout << dict[i].name << " " << i << (dict[i].immd ? "* " : " ");
+        if ((i%10)==0) fout << ENDL; to_s(i);
     }
 }
 ///
@@ -258,13 +257,25 @@ static void mem_stat() {
 ///
 /// macros to reduce verbosity
 ///
+inline void WORD()     { fin >> strbuf; colon(strbuf.c_str()); }  // create a colon word
+inline char *SCAN(c)   { getline(fin, strbuf, c); return strbuf.c_str(); }
 inline DU   PUSH(DU v) { ss.push(top); return top = v;         }
 inline DU   POP()      { DU n=top; top=ss.pop(); return n;     }
-#define     PFID       (dict[WP].pf+IP+sizeof(IU))  /* get parameter field index */
-#define     CELL(a)    (*(DU*)&pmem[a])
 #define     CODE(s, g) { s, [&](IU c){ g; }, 0 }
 #define     IMMD(s, g) { s, [&](IU c){ g; }, 1 }
 #define     BOOL(f)    ((f)?-1:0)
+///
+/// macros to abstract pmem access
+///
+#define     PFID       (dict[WP].pf+IP+sizeof(IU))  /* get parameter field index */
+#define     CELL(a)    (*(DU*)&pmem[a])
+#define     HALF(a)    (*(U16*)&pem[a])
+#define     BYTE(a)    (*&pem[a])
+///
+/// global memory access
+///
+#define     PEEK(a)    (DU)(*(DU*)((uintptr_t)(a)))
+#define     POKE(a, c) (*(DU*)((uintptr_t)(a))=(DU)(c))
 ///
 /// primitives (ROMable)
 /// Note:
@@ -304,20 +315,23 @@ static Code prim[] PROGMEM = {
     /// @defgroup ALU ops
     /// @{
     CODE("+",    top += ss.pop()),
-    CODE("-",    top =  ss.pop() - top),
     CODE("*",    top *= ss.pop()),
+    CODE("-",    top =  ss.pop() - top),
     CODE("/",    top =  ss.pop() / top),
     CODE("mod",  top =  ss.pop() % top),
-    CODE("*/",   top = ss.pop() * ss.pop() / top),
+    CODE("*/",   top =  ss.pop() * ss.pop() / top),
+    CODE("/mod",
+        DU n = ss.pop(); DU t = top;
+        ss.push(n % t); top = (n / t)),
     CODE("*/mod",
         DU n = ss.pop() * ss.pop();
         DU t = top;
         ss.push(n % t); top = (n / t)),
-    CODE("and",  top = ss.pop()&top),
-    CODE("or",   top = ss.pop()|top),
-    CODE("xor",  top = ss.pop()^top),
-    CODE("negate", top = -top),
+    CODE("and",  top = ss.pop() & top),
+    CODE("or",   top = ss.pop() | top),
+    CODE("xor",  top = ss.pop() ^ top),
     CODE("abs",  top = abs(top)),
+    CODE("negate", top = -top),
     CODE("max",  DU n=ss.pop(); top = (top>n)?top:n),
     CODE("min",  DU n=ss.pop(); top = (top<n)?top:n),
     CODE("2*",   top *= 2),
@@ -345,146 +359,91 @@ static Code prim[] PROGMEM = {
     CODE("decimal", fout << setbase(base = 10)),
     CODE("cr",      fout << ENDL),
     CODE(".",       fout << POP() << " "),
-#if 0
     CODE(".r",      DU n = POP(); dot_r(n, POP())),
     CODE("u.r",     DU n = POP(); dot_r(n, abs(POP()))),
     CODE(".f",      DU n = POP(); fout << setprecision(n) << POP()),
-    CODE("key",     PUSH(next_idiom()[0])),
-#endif
+    CODE("key",     PUSH(SCAN(' ')[0])),
     CODE("emit",    char b = (char)POP(); fout << b),
     CODE("space",   fout << " "),
-    CODE("spaces",  for (int n = POP(), i = 0; i < n; i++) fout << " "),
+    CODE("spaces",  for (DU n = POP(), i = 0; i < n; i++) fout << " "),
     /// @}
     /// @defgroup Literal ops
     /// @{
-    CODE("dovar",
-        PUSH(PFID); IP += sizeof(DU)),      // push and advance to next instruction
-    CODE("dolit",
-    	DU *i = (DU*)&pmem[PFID];           // fetch the value
-        PUSH(*i); IP += sizeof(DU)),        // push and advance to next instruction
+    CODE("dovar",   PUSH(PFID); IP += sizeof(DU)),
+    CODE("dolit",   PUSH(CELL(PFID)); IP += sizeof(DU)),
+    CODE("dostr",   PUSH(PFID); IP += ALIGN(strlen(s)+1)),
     CODE("dotstr",
         const char *s = (char*)&pmem[PFID]; // get string pointer
         fout << s;                          // send to output console
         IP += ALIGN(strlen(s)+1)),          // advance to next instruction
-    CODE("[", compile = false),
-    CODE("]", compile = true),
-    IMMD(".\"", addstr(next_idiom('"')+1)),
-    IMMD("(",   next_idiom(')')),
-    IMMD(".(",  fout << next_idiom(')')),
-    CODE("\\",  next_idiom('\n')),
-    CODE("$\"", addstr(next_idiom('"')+1)),
+    CODE("[",       compile = false),
+    CODE("]",       compile = true),
+    IMMD("(",       SCAN(')')),
+    IMMD(".(",      fout << SCAN(')')),
+    CODE("\\",      SCAN('\n')),
+    CODE("$\"",     addstr(SCAN('"')+1)),
+    IMMD(".\"",     adddotstr(SCAN('"')+1)),
     /// @}
     /// @defgroup Branching ops
     /// @brief - if...then, if...else...then
     /// @{
-#if 0
-    IMMD("bran", bool f = POP() != 0; call(f ? c.pf : c.pf1)),
-    IMMD("if",
-        dict[-1]->addcode(BRAN("bran"));
-        dict.push(TEMP())),      // use last cell of dictionay as scratch pad
-    IMMD("else",
-        CodeP temp = dict[-1]; CodeP last = dict[-2]->pf[-1];
-        last->pf.merge(temp->pf);
-        temp->pf.clear();
-        last->stage = 1),
-    IMMD("then",
-        CodeP temp = dict[-1]; CodeP last = dict[-2]->pf[-1];
-        if (last->stage == 0) {                     // if...then
-            last->pf.merge(temp->pf);
-            dict.pop();
-        }
-        else {                                      // if...else...then, or
-            last->pf1.merge(temp->pf);             // for...aft...then...next
-            if (last->stage == 1) dict.pop();
-            else temp->pf.clear();
-        }),
+    CODE("exit",    throw " "),
+    CODE("branch" , IP = (IU)pmem[PFID] - sizeof(IU)),
+    CODE("0branch", IP = POP() ? IP + sizeof(IU) : (IU)pmem[PFID] - sizeof(IU)),
+    CODE("donext" , DU i = rs.pop() - 1;
+         if (i<0) IP += sizeof(IU);
+         else { IP = (IU)pmem[PFID] - sizeof(IU); rs.push(i); }),
+    IMMD("if",      addcode(find("0branch")); PUSH(XIP); addcode(0)), // if    ( -- here ) 
+    IMMD("else",                                                      // else ( here -- there )
+        addcode(find("branch"));      
+        IU h=XIP;   addcode(0); pmem[dict[-1]->pf + POP()]=XIP; PUSH(h)),
+    IMMD("then",    pmem[dict[-1]->pf + POP()]=XIP),
     /// @}
     /// @defgroup Loops
     /// @brief  - begin...again, begin...f until, begin...f while...repeat
     /// @{
-    CODE("loop",
-        while (true) {
-            call(c.pf);                                           // begin...
-            int f = INT(top);
-            if (c.stage == 0 && (top = ss.pop(), f != 0)) break;  // ...until
-            if (c.stage == 1) continue;                           // ...again
-            if (c.stage == 2 && (top = ss.pop(), f == 0)) break;  // while...repeat
-            call(c.pf1);
-        }),
-    IMMD("begin",
-        dict[-1]->addcode(BRAN("loop"));
-        dict.push(TEMP())),
-    IMMD("while",
-        CodeP last = dict[-2]->pf[-1]; CodeP temp = dict[-1];
-        last->pf.merge(temp->pf);
-        temp->pf.clear(); last->stage = 2),
-    IMMD("repeat",
-        CodeP last = dict[-2]->pf[-1]; CodeP temp = dict[-1];
-        last->pf1.merge(temp->pf); dict.pop()),
-    IMMD("again",
-        CodeP last = dict[-2]->pf[-1]; CodeP temp = dict[-1];
-        last->pf.merge(temp->pf);
-        last->stage = 1; dict.pop()),
-    IMMD("until",
-        CodeP last = dict[-2]->pf[-1]; CodeP temp = dict[-1];
-        last->pf.merge(temp->pf); dict.pop()),
+    IMMD("begin",   PUSH(XIP)),
+    IMMD("again",   addcode(find("branch")); addcode(POP())),          // again    ( there -- ) 
+    IMMD("until",   addcode(find("0branch")); addcode(POP())),         // until    ( there -- ) 
+    IMMD("while",   addcode(find("0branch")); PUSH(XIP); addcode(0)),  // while    ( there -- there here ) 
+    IMMD("repeat",  addcode(find("branch"));                           // repeat    ( there1 there2 -- ) 
+        IU t=POP(); addcode(POP()); pmem[dict[-1]->pf + t]=XIP),
     /// @}
     /// @defgrouop For loops
     /// @brief  - for...next, for...aft...then...next
     /// @{
-    CODE("cycle",
-       do { call(c.pf); }
-        while (c.stage == 0 && rs.dec_i() >= 0);    // for...next only
-        while (c.stage > 0) {                       // aft
-            call(c.pf2);                            // then...next
-            if (rs.dec_i() < 0) break;
-            call(c.pf1);                            // aft...then
-        }
-        rs.pop()),
-    IMMD("for",
-        dict[-1]->addcode(find(">r"));
-        dict[-1]->addcode(BRAN("cycle"));
-        dict.push(TEMP())),
-    IMMD("aft",
-        CodeP last = dict[-2]->pf[-1]; CodeP temp = dict[-1];
-        last->pf.merge(temp->pf);
-        temp->pf.clear(); last->stage = 3),
-    IMMD("next",
-        CodeP last = dict[-2]->pf[-1]; CodeP temp = dict[-1];
-        if (last->stage == 0) last->pf.merge(temp->pf);
-        else last->pf2.merge(temp->pf); dict.pop()),
+    IMMD("for" ,    addcode(find(">r")); PUSH(XIP)),                    // for ( -- here )
+    IMMD("next",    addcode(find("donext")); addcode(POP())),           // next ( here -- )
+    IMMD("aft",     POP(); addcode(find("branch"));                     // aft ( here -- here there )
+        IU h=XIP; addcode(0); PUSH(XIP); PUSH(h)),
     /// @}
     /// @defgrouop Compiler ops
     /// @{
-    CODE("exit", int x = top; throw domain_error(string())),   // need x=top, Arduino bug
-#endif
-    CODE("exec",   nest(top)),
-    CODE(":",      colon(next_idiom()); compile=true),        // create a new word
-    IMMD(";",      compile = false),
-    CODE("variable", colon(next_idiom()); addvar()),
-    CODE("constant", colon(next_idiom()); addlit(POP())),
-    CODE("@",      IU a = POP(); PUSH(CELL(a))),              // w -- n
-    CODE("!",      IU a = POP(); CELL(a) = POP()),            // n w --
-    CODE("+!",     IU a = POP(); CELL(a) += POP()),           // n w --
-    CODE("?",      IU a = POP(); fout << CELL(a) << " "),     // w --
-    CODE("array@", IU a = POP(); DU w = POP();                // w a -- n
-		PUSH(CELL(a + w*sizeof(DU)))),
-    CODE("array!", IU a = POP(); DU w = POP();                // n w a --
-		CELL(a + w*sizeof(DU)) = POP()),
-    CODE("allot",                                             // n --
-		for (IU n = POP(), i = 0; i < n; i++) {
-            pmem.push((U8*)&i, sizeof(DU));
-		}),
-    CODE(",", DU v = POP(); pmem.push((U8*)&v, sizeof(DU))),
+    CODE(":",        WORD(); compile=true),
+    IMMD(";",        compile = false),
+    CODE("create",   WORD();
+         addcode(find("dovar"));                             // dovar (+parameter field) 
+         XIP += sizeof(DU)),                                 // skip to next field
+    CODE("variable", WORD(); addvar()),
+    CODE("constant", WORD(); addlit(POP())),
+    CODE("c@",    IU w = POP(); PUSH(BYTE(w));),             // w -- n
+    CODE("c!",    IU w = POP(); BYTE(w) = POP()),
+    CODE("w@",    IU w = POP(); PUSH(HALF(w))),              // w -- n
+    CODE("w!",    IU w = POP(); HALF(w) = POP()),
+    CODE("@",     IU w = POP(); PUSH(CELL(w))),              // w -- n
+    CODE("!",     IU w = POP(); CELL(w) = POP();),           // n w --
+    CODE("+!",    IU w = POP(); CELL(w) += POP()),           // n w --
+    CODE("?",     IU w = POP(); fout << CELL(w) << " "),     // w --
+    CODE("array@",IU a = POP()*sizeof(DU); IU w = POP(); PUSH(CELL(w+a))),   // w a -- n
+    CODE("array!",IU a = POP()*sizeof(DU); IU w = POP(); CELL(w+a) = POP()), // n w a --
+    CODE("allot", DU v = 0;                                  // n --
+        for (IU n = POP(), i = 0; i < n; i++) pmem.push((U8*)&v, sizeof(DU))),
+    CODE(",",     DU i = POP(); pmem.push((U8*)&i, sizeof(DU))),
     /// @}
     /// @defgroup metacompiler
     /// @{
+    CODE("'",     IU w = find(SCAN(' ')); PUSH(w)),
 #if 0
-    CODE("create",
-        dict.push(WORD());                                  // create a new word
-        Code& last = dict[-1]->addcode(LIT("dovar", DVAL));
-        last.pf[0]->token = last.token;
-        last.pf[0]->qf.clear()),
     CODE("does",
         ForthList<CodeP>& src = dict[WP]->pf;               // source word : xx create...does...;
         int n = src.size();
@@ -505,24 +464,20 @@ static Code prim[] PROGMEM = {
     /// @}
     /// @defgroup Debug ops
     /// @{
-    CODE("bye",   exit(0)),
     CODE("here",  PUSH(pmem.idx)),
     CODE("words", words()),
     CODE(".s",    ss_dump()),
-    CODE("'",     PUSH(find(next_idiom()))),
-    CODE("see",   see(find(next_idiom()))),
+    CODE("see",   see(find(SCAN(' ')))),
     CODE("dump",  DU sz = POP(); IU a = POP(); mem_dump(a, sz)),
     CODE("forget",
-        IU w = find(next_idiom());
+        IU w = find(SCAN(' '));
         if (w<0) return;
         IU b = find("boot")+1;
         dict.clear(w > b ? w : b)),
     CODE("clock", PUSH(millis())),
     CODE("delay", delay(POP())),
-#if 0
     CODE("peek",  DU a = POP(); PUSH(PEEK(a))),
     CODE("poke",  DU a = POP(); POKE(a, POP())),
-#endif
     /// @}
     /// @defgroup Arduino specific ops
     /// @{
@@ -530,12 +485,13 @@ static Code prim[] PROGMEM = {
     CODE("in",    PUSH(digitalRead(POP()))),
     CODE("out",   DU p = POP(); digitalWrite(p, POP())),
     CODE("adc",   PUSH(analogRead(POP()))),
-    CODE("pwm",   DU p = POP(); analogWrite(p, POP(), 255)),
-    CODE("attach",DU p = POP(); ledcAttachPin(p, POP())),
-    CODE("setup", DU p = POP(); DU freq = POP(); ledcSetup(p, freq, POP())),
-    CODE("tone",  DU p = POP(); ledcWriteTone(p, POP())),
+    CODE("duty",  DU p = POP(); analogWrite(p, POP(), 255)),
+    CODE("attach",DU p  = POP(); ledcAttachPin(p, POP())),
+    CODE("setup", DU ch = POP(); DU freq=POP(); ledcSetup(ch, freq, POP())),
+    CODE("tone",  DU ch = POP(); ledcWriteTone(ch, POP())),
     /// @}
-    CODE("boot", dict.clear(find("boot") + 1))
+    CODE("bye",   exit(0)),
+    CODE("boot",  dict.clear(find("boot") + 1))
 };
 const int PSZ = sizeof(prim)/sizeof(Code);
 ///
@@ -543,20 +499,16 @@ const int PSZ = sizeof(prim)/sizeof(Code);
 ///
 void forth_init() {
     for (int i=0; i<PSZ; i++) {             /// copy prim(ROM) into RAM dictionary,
-        uintptr_t a = (uintptr_t)prim[i].name;
-        uintptr_t b = (uintptr_t)prim[i].xt;
-        Serial.print(prim[i].name);
-        Serial.print(":"); Serial.print(a, HEX);
-        Serial.print(","); Serial.println(b, HEX);
         dict.push(prim[i]);                 /// find() can be modified to support
     }                                       /// searching both spaces
+    words();
 }
 ///
 /// outer interpreter
 ///
-int forth_outer() {
-    const char *idiom;
-    while (idiom=next_idiom()) {
+void forth_outer() {
+    while (fin >> strbuf) {
+        const char *idiom = strbuf.c_str();
         printf("%s=>", idiom);
         int w = find(idiom);           /// * search through dictionary
         if (w>=0) {                                 /// * word found?
@@ -574,6 +526,7 @@ int forth_outer() {
         if (*p != '\0') {                           /// * not number
             fout << idiom << "? " << ENDL;          ///> display error prompt
             compile = false;                        ///> reset to interpreter mode
+            ss.clear(0); top = -1;
             break;                                  ///> skip the entire input buffer
         }
         // is a number
@@ -593,12 +546,39 @@ static String process_command(String cmd) {
     forth_outer();                      // invoke outer interpreter
     return String(fout.str().c_str());  // return response as a String object
 }
+///
+/// ledc 
+///
+// use first channel of 16 channels (started from zero)
+#define LEDC_CHANNEL_0     0
+// use 13 bit precission for LEDC timer
+#define LEDC_TIMER_13_BIT  13
+// use 5000 Hz as a LEDC base frequency
+#define LEDC_BASE_FREQ     5000
+// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
+#define LED_PIN            5
+#define BRIGHTNESS         255    // how bright the LED is
 
 void setup() {
     Serial.begin(115200);
     delay(100);
+    // Setup timer and attach timer to a led pin
+    ledcSetup(0, 100, LEDC_TIMER_13_BIT);
+    ledcAttachPin(5, 0);
+//    analogWrite(0, 250, BRIGHTNESS);
+    pinMode(2,OUTPUT);
+    digitalWrite(2, HIGH);   // turn the LED2 on 
+    pinMode(16,OUTPUT);
+    digitalWrite(16, LOW);   // motor1 forward
+    pinMode(17,OUTPUT);
+    digitalWrite(17, LOW);   // motor1 backward 
+    pinMode(18,OUTPUT);
+    digitalWrite(18, LOW);   // motor2 forward 
+    pinMode(19,OUTPUT);
+    digitalWrite(19, LOW);   // motor2 bacward
+
     forth_init();
-    Serial.println("\nesp32forth8 experimental");
+    Serial.println("\nesp32forth8 experimental 3");
     mem_stat();
 }
 
