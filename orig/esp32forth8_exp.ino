@@ -5,6 +5,8 @@
 #include <stdlib.h>     // strtol
 #include <string.h>     // strcmp
 #include <exception>    // try...catch, throw (disable for less capable MCU)
+#include "SPIFFS.h"     // flash memory
+#include <WebServer.h>
 ///
 /// logical units (instead of physical) for type check and portability
 ///
@@ -96,6 +98,7 @@ List<U8,   64*1024> pmem; /// parameter memory i.e. storage for all colon defini
 ///
 bool compile = false;
 DU   top = -1, base = 10;
+DU   ucase = 1;           /// case sensitivity control
 IU   WP = 0, IP = 0;
 ///
 /// macros to abstract dict and pmem access
@@ -105,6 +108,7 @@ IU   WP = 0, IP = 0;
 #define STRLEN(s) (ALIGN(strlen(s)+1))              /** calculate string size with alignment     */
 #define XIP       (dict[-1].len)                    /** parameter field tail of latest word      */
 #define PFA       (dict[WP].pfa+IP+sizeof(IU))      /** get parameter field of current word      */
+#define NEXT_OP   (*(IU*)&pmem[dict[WP].pfa + IP])  /** fetch next word, for nest()              */
 #define CELL(a)   (*(DU*)&pmem[a])                  /** fetch a cell from parameter memory       */
 #define HALF(a)   (*(U16*)&pmem[a])                 /** fetch half a cell from parameter memory  */
 #define BYTE(a)   (*(U8*)&pmem[a])                  /** fetch a byte from parameter memory       */
@@ -113,21 +117,25 @@ IU   WP = 0, IP = 0;
 #define JMPIP     (*(IU*)&pmem[PFA] - sizeof(IU))   /** get jump target address                  */
 #define HERE      (pmem.idx)                        /** current parameter memory index           */
 ///
-/// inline functions to reduce verbosity (and abstraction)
+/// inline functions to abstract and reduce verbosity
 ///
-inline IU   NEXT_OP() { IU w=*(IU*)&pmem[dict[WP].pfa + IP]; IP+=sizeof(IU); return w; }  /** fetch next word (for nest)   */
-inline void ADD_IU(IU i)   { pmem.push((U8*)&i, sizeof(IU)); XIP+=sizeof(IU); } /** add an instruction into pmem */
-inline void ADD_DU(DU v)   { pmem.push((U8*)&v, sizeof(DU)), XIP+=sizeof(DU); } /** add a cell into pmem         */
-inline void ADD_STR(const char *s) {                                            /** add a string to pmem         */
+inline void ADD_IU(IU i)   { pmem.push((U8*)&i, sizeof(IU));  XIP+=sizeof(IU);  }  /** add an instruction into pmem */
+inline void ADD_DU(DU v)   { pmem.push((U8*)&v, sizeof(DU)),  XIP+=sizeof(DU);  }  /** add a cell into pmem         */
+inline void ADD_BYTE(U8 b) { pmem.push((U8*)&b, sizeof(U8));  XIP+=sizeof(U8);  }
+inline void ADD_HALF(U16 w){ pmem.push((U8*)&w, sizeof(U16)); XIP+=sizeof(U16); }
+inline void ADD_STR(const char *s) {                                               /** add a string to pmem         */
     int sz = STRLEN(s); pmem.push((U8*)s,  sz); XIP += sz;
 }
-inline void ADD_WORD(const char *s) { ADD_IU(find(s)); }                        /** find a word and add to pmem  */
+inline void ADD_WORD(const char *s) { ADD_IU(find(s)); }                           /** find a word and add to pmem  */
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
 ///
+inline int  STREQ(const char *s1, const char *s2) {
+    return ucase ? strcasecmp(s1, s2)==0 : strcmp(s1, s2)==0;
+}
 int find(const char *s) {
     for (int i = dict.idx - (compile ? 2 : 1); i >= 0; --i) {
-        if (strcmp(s, dict[i].name)==0) return i;
+        if (STREQ(s, dict[i].name)==0) return i;
     }
     return -1;
 }
@@ -181,12 +189,14 @@ void nest(IU c) {
     if (rs.idx > rs_max) rs_max = rs.idx;   // keep rs sizing matrics
     try {
         while (IP < dict[c].len) {          // in instruction range
-            nest(NEXT_OP());                // fetch/exec instruction from code field
-        }
+            nest(NEXT_OP);                  // fetch/exec instruction from code field
+            IP += sizeof(IU);               // advance to next instruction
+        }                                   // can do IP++ if pmem unit is 16-bit
     }
     catch(...) {}
     IP = rs.pop(); WP = rs.pop();           // restore call frame
 }
+///==============================================================================
 ///
 /// utilize C++ standard template libraries for core IO functions only
 /// Note:
@@ -204,7 +214,6 @@ string strbuf;          // input string buffer
 ///
 /// Arduino specific macros
 ///
-#define to_string(i)        string(String(i).c_str())
 #define analogWrite(c,v,mx) ledcWrite((c),(8191/mx)*min((int)(v),mx))
 #define ENDL                endl
 ///
@@ -245,25 +254,9 @@ void see(IU c, int dp=0) {
     }
 }
 void words() {
-    for (int i=0; i<dict.idx - 1; i--) {
-        if ((i%10)==0) fout << ENDL; to_s(i);
-    }
-}
-///
-/// memory statistics dump - for heap and stack debugging
-///
-static void mem_stat() {
-    Serial.print("Core:");          Serial.print(xPortGetCoreID());
-    Serial.print(" heap[maxblk=");  Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    Serial.print(", avail=");        Serial.print(heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    Serial.print(", rs_max=");       Serial.print(rs_max);
-    Serial.print(", pmem=");         Serial.print(HERE);
-    Serial.print("], lowest[heap="); Serial.print(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
-    Serial.print(", stack=");        Serial.print(uxTaskGetStackHighWaterMark(NULL));
-    Serial.println("]");
-    if (!heap_caps_check_integrity_all(true)) {
-//        heap_trace_dump();     // dump memory, if we have to
-        abort();                 // bail, on any memory error
+    for (int i=0; i<dict.idx - 1; i++) {
+        if ((i%10)==0) fout << ENDL;
+        to_s(i);
     }
 }
 ///
@@ -289,12 +282,7 @@ inline DU   POP()         { DU n=top; top=ss.pop(); return n;     }
 ///   * it can be stored in ROM, and only
 ///   * find() needs to be modified to support ROM+RAM
 ///
-auto _colon = [&](int c) {
-    fin >> strbuf;
-    colon(strbuf.c_str());
-    compile=true;
-};
-static Code prim[] PROGMEM = {
+static Code prim[] = {
     ///
     /// @defgroup Stack ops
     /// @{
@@ -381,7 +369,7 @@ static Code prim[] PROGMEM = {
         PUSH(PFA); IP += STRLEN(s)),        // put string pfa on stack
     CODE("dotstr",
         const char *s = STR(PFA);           // get string pointer
-        fout << s;  IP += STRLEN(s)),       // send to output console
+        fout << s; IP += STRLEN(s)),        // send to output console
     CODE("[",       compile = false),
     CODE("]",       compile = true),
     IMMD("(",       SCAN(')')),
@@ -394,12 +382,8 @@ static Code prim[] PROGMEM = {
     /// @brief - if...then, if...else...then
     /// @{
     CODE("exit",    throw " "),
-    CODE("branch" , IP = JMPIP),
-    CODE("0branch", IP = POP() ? IP + sizeof(IU) : JMPIP),
-    CODE("donext" ,
-         DU i = rs.pop() - 1;                                    // decrement counter
-         if (i<0) { IP += sizeof(IU);       }                    // break
-         else     { IP = JMPIP; rs.push(i); }),                  // loop back
+    CODE("branch" , IP = JMPIP),                                 // unconditional branch
+    CODE("0branch", IP = POP() ? IP + sizeof(IU) : JMPIP),       // conditional branch
     IMMD("if",      ADD_WORD("0branch"); PUSH(XIP); ADD_IU(0)),  // if    ( -- here ) 
     IMMD("else",                                                 // else ( here -- there )
         ADD_WORD("branch");
@@ -419,6 +403,10 @@ static Code prim[] PROGMEM = {
     /// @defgrouop For loops
     /// @brief  - for...next, for...aft...then...next
     /// @{
+    CODE("donext" ,
+         DU i = rs.pop() - 1;                                    // decrement counter
+         if (i<0) { IP += sizeof(IU);       }                    // break
+         else     { IP = JMPIP; rs.push(i); }),                  // loop back
     IMMD("for" ,    ADD_WORD(">r"); PUSH(XIP)),                  // for ( -- here )
     IMMD("next",    ADD_WORD("donext"); ADD_IU(POP())),          // next ( here -- )
     IMMD("aft",     POP(); ADD_WORD("branch");                   // aft ( here -- here there )
@@ -430,23 +418,24 @@ static Code prim[] PROGMEM = {
     IMMD(";",       compile = false),
     CODE("create",  NEW_WORD();
          ADD_WORD("dovar");                                      // dovar (+parameter field) 
-         XIP -= sizeof(DU)),                                     // skip to next field
+         XIP -= sizeof(DU)),                                     // backup one field
     CODE("variable",NEW_WORD(); addvar()),
     CODE("constant",NEW_WORD(); addlit(POP())),
     CODE("c@",    IU w = POP(); PUSH(BYTE(w));),                 // w -- n
     CODE("c!",    IU w = POP(); BYTE(w) = POP()),
+    CODE("c,",    DU n = POP(); ADD_BYTE(n)), 
     CODE("w@",    IU w = POP(); PUSH(HALF(w))),                  // w -- n
     CODE("w!",    IU w = POP(); HALF(w) = POP()),
+    CODE("w,",    DU n = POP(); ADD_HALF(n)),
     CODE("@",     IU w = POP(); PUSH(CELL(w))),                  // w -- n
     CODE("!",     IU w = POP(); CELL(w) = POP();),               // n w --
+    CODE(",",     DU n = POP(); ADD_DU(n)), 
+    CODE("allot", DU v = 0; for (IU n = POP(), i = 0; i < n; i++) ADD_DU(v)), // n --
     CODE("+!",    IU w = POP(); CELL(w) += POP()),               // n w --
     CODE("?",     IU w = POP(); fout << CELL(w) << " "),         // w --
-    CODE("allot", DU v = 0; for (IU n = POP(), i = 0; i < n; i++) ADD_DU(v)), // n --
-    CODE(",",     DU i = POP(); ADD_DU(i)),
     /// @}
     /// @defgroup metacompiler
     /// @{
-    CODE("'",     IU w = find(SCAN(' ')); PUSH(w)),
     CODE("does",  /* TODO */),
     CODE("to",    /* TODO */),
     CODE("is",    /* TODO */),
@@ -455,10 +444,14 @@ static Code prim[] PROGMEM = {
     /// @defgroup Debug ops
     /// @{
     CODE("here",  PUSH(HERE)),
+    CODE("ucase", ucase = POP()),
     CODE("words", words()),
+    CODE("'",     IU w = find(SCAN(' ')); PUSH(w)),
     CODE(".s",    ss_dump()),
     CODE("see",   see(find(SCAN(' ')))),
     CODE("dump",  DU sz = POP(); IU a = POP(); mem_dump(a, sz)),
+    CODE("peek",  DU a = POP(); PUSH(PEEK(a))),
+    CODE("poke",  DU a = POP(); POKE(a, POP())),
     CODE("forget",
         IU w = find(SCAN(' '));
         if (w<0) return;
@@ -466,8 +459,6 @@ static Code prim[] PROGMEM = {
         dict.clear(w > b ? w : b)),
     CODE("clock", PUSH(millis())),
     CODE("delay", delay(POP())),
-    CODE("peek",  DU a = POP(); PUSH(PEEK(a))),
-    CODE("poke",  DU a = POP(); POKE(a, POP())),
     /// @}
     /// @defgroup Arduino specific ops
     /// @{
@@ -491,7 +482,6 @@ void forth_init() {
     for (int i=0; i<PSZ; i++) {              /// copy prim(ROM) into RAM dictionary,
         dict.push(prim[i]);                  /// find() can be modified to support
     }                                        /// searching both spaces
-    words();
 }
 ///
 /// outer interpreter
@@ -525,6 +515,69 @@ void forth_outer() {
     }
     if (!compile) ss_dump();
 }
+///==========================================================================
+/// ESP32 Web Serer connection and index page
+///==========================================================================
+const char *ssid = "Frontier7008";
+const char *pass = "8551666595";
+
+WebServer server(80);
+
+/******************************************************************************/
+/* ledc                                                                       */
+/******************************************************************************/
+/* LEDC Software Fade */
+// use first channel of 16 channels (started from zero)
+#define LEDC_CHANNEL_0     0
+// use 13 bit precission for LEDC timer
+#define LEDC_TIMER_13_BIT  13
+// use 5000 Hz as a LEDC base frequency
+#define LEDC_BASE_FREQ     5000
+// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
+#define LED_PIN            5
+#define BRIGHTNESS         255    // how bright the LED is
+
+static const char *index_html PROGMEM = R"XX(
+<html><head><meta charset='UTF-8'><title>esp32forth</title>
+<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
+</head>
+<body>
+    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
+         background-color:#f8f0f0;'>ESP32Forth 8.02</div>
+    <textarea id='tib' style='height:600px;width:400px;'
+        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
+</body>
+<script>
+let log = document.getElementById('log')
+let tib = document.getElementById('tib')
+function httpPost(url, items, callback) {
+    let fd = new FormData()
+    for (k in items) { fd.append(k, items[k]) }
+    let r = new XMLHttpRequest()
+    r.onreadystatechange = function() {
+        if (this.readyState != XMLHttpRequest.DONE) return
+        callback(this.status===200 ? this.responseText : null) }
+    r.open('POST', url)
+    r.send(fd) }
+function chunk(ary, d) {                        // recursive call to sequence POSTs
+    req = ary.slice(0,30).join('\n')            // 30*(average 50 byte/line) ~= 1.5K
+    if (req=='' || d>20) return                 // bail looping, just in case
+    log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
+    httpPost('/input', { cmd: req }, rsp=>{
+        if (rsp !== null) {
+            log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
+            log.scrollTop=log.scrollHeight      // scroll down
+            chunk(ary.splice(30), d+1) }})}     // next 30 lines
+function forth() { 
+    let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
+    let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
+    chunk(cmd.split('\n'), 1); tib.value = '' }
+window.onload = ()=>{ tib.focus() }
+</script></html>
+)XX";
+///==========================================================================
+/// ForthVM front-end handlers
+///==========================================================================
 ///
 /// translate ESP32 String to/from Forth input/output streams (in C++ string)
 ///
@@ -536,46 +589,123 @@ static String process_command(String cmd) {
     return String(fout.str().c_str());  // return response as a String object
 }
 ///
-/// ledc 
+/// Forth bootstrap loader (from Flash)
 ///
-// use first channel of 16 channels (started from zero)
-#define LEDC_CHANNEL_0     0
-// use 13 bit precission for LEDC timer
-#define LEDC_TIMER_13_BIT  13
-// use 5000 Hz as a LEDC base frequency
-#define LEDC_BASE_FREQ     5000
-// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
-#define LED_PIN            5
-#define BRIGHTNESS         255    // how bright the LED is
-
+static int forth_load(const char *fname) {
+    if (!SPIFFS.begin()) {
+        Serial.println("Error mounting SPIFFS"); return 1; }
+    File file = SPIFFS.open(fname, "r");
+    if (!file) {
+        Serial.print("Error opening file:"); Serial.println(fname); return 1; }
+    Serial.print("Loading file: "); Serial.print(fname); Serial.print("...");
+    while (file.available()) {
+        // retrieve command from Flash memory
+        String cmd = file.readStringUntil('\n');
+        Serial.println("<< "+cmd);  // display bootstrap command on console
+        // send it to Forth command processor
+        process_command(cmd); }
+    Serial.println("Done loading.");
+    file.close();
+    SPIFFS.end();
+    return 0;
+}
+///
+/// memory statistics dump - for heap and stack debugging
+///
+static void mem_stat() {
+    Serial.print("Core:");          Serial.print(xPortGetCoreID());
+    Serial.print(" heap[maxblk=");  Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    Serial.print(", avail=");        Serial.print(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    Serial.print(", rs_max=");       Serial.print(rs_max);
+    Serial.print(", pmem=");         Serial.print(HERE);
+    Serial.print("], lowest[heap="); Serial.print(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    Serial.print(", stack=");        Serial.print(uxTaskGetStackHighWaterMark(NULL));
+    Serial.println("]");
+    if (!heap_caps_check_integrity_all(true)) {
+//        heap_trace_dump();     // dump memory, if we have to
+        abort();                 // bail, on any memory error
+    }
+}
+///==========================================================================
+/// Web Server handlers
+///==========================================================================
+static void handleInput() {
+    // receive POST from web browser
+    if (!server.hasArg("cmd")) {  // make sure parameter contains "cmd" property
+        server.send(500, "text/plain", "Missing Input\r\n");
+        return;
+    }
+    // retrieve command from web server
+    String cmd = server.arg("cmd");
+    Serial.print("\n>> "+cmd);          // display requrest on console
+    // send requrest command to Forth command processor, and receive response
+    String rsp = process_command(cmd);
+    Serial.print(rsp);                  // display response on console
+    mem_stat();
+    // send response back to web browser
+    server.setContentLength(rsp.length());
+    server.send(200, "text/plain; charset=utf-8", rsp);
+}
+///==========================================================================
+/// ESP32 routines
+///==========================================================================
 void setup() {
     Serial.begin(115200);
     delay(100);
+    //  WiFi.config(ip, gateway, subnet);
+    WiFi.mode(WIFI_STA);
+    // attempt to connect to Wifi network:
+    WiFi.begin(ssid, pass);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print("."); }
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    // if you get a connection, report back via serial:
+    server.begin();
+    Serial.println("Booting esp32Forth v8.2 ...");
     // Setup timer and attach timer to a led pin
     ledcSetup(0, 100, LEDC_TIMER_13_BIT);
     ledcAttachPin(5, 0);
-//    analogWrite(0, 250, BRIGHTNESS);
+    analogWrite(0, 250, BRIGHTNESS);
     pinMode(2,OUTPUT);
-    digitalWrite(2, HIGH);   // turn the LED2 on 
+    digitalWrite(2, HIGH);   // turn the LED2 on
     pinMode(16,OUTPUT);
     digitalWrite(16, LOW);   // motor1 forward
     pinMode(17,OUTPUT);
-    digitalWrite(17, LOW);   // motor1 backward 
+    digitalWrite(17, LOW);   // motor1 backward
     pinMode(18,OUTPUT);
-    digitalWrite(18, LOW);   // motor2 forward 
+    digitalWrite(18, LOW);   // motor2 forward
     pinMode(19,OUTPUT);
     digitalWrite(19, LOW);   // motor2 bacward
-
+    // Setup web server handlers
+    server.on("/", HTTP_GET, []() {
+        server.send(200, "text/html", index_html); });
+    server.on("/input", HTTP_POST, handleInput);
+    server.begin();
+    Serial.println("HTTP server started");
+    ///
+    /// ForthVM initalization
+    ///
     forth_init();
+    forth_load("/load.txt");    // compile \data\load.txt
+    
     Serial.println("\nesp32forth8 experimental 5");
     mem_stat();
 }
 
 void loop(void) {
+    server.handleClient(); // ESP32 handle web requests
+    delay(2);              // yield to background tasks (interrupt, timer,...)
+    ///
+    /// while Web requests come in from handleInput asynchronously,
+    /// we also take user input from console (for debugging mostly)
+    ///
     // for debugging: we can also take user input from Serial Monitor
     if (Serial.available()) {
         String cmd = Serial.readString();
-        Serial.println(cmd);                  // sent cmd to console
         Serial.print(process_command(cmd));   // sent result to console
         mem_stat();
         delay(2);
