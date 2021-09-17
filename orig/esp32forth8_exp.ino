@@ -232,8 +232,9 @@ static IU _dovar, _dolit, _dostr, _dotstr, _bran,  _0bran, _donext;
 void see(IU *wp, IU *ip, int dp=0) {
     IU c = *wp;
     fout << ENDL; for (int i=dp; i>0; i--) fout << "  ";			// indentation
-    if (dp) fout << setw(4) << *ip;									// ip offset
-    fout << "[ "; to_s(c);											// name field
+    if (dp) fout << "[" << *ip << ": ";          					// ip offset
+    else    fout << "[ ";
+    to_s(c);                                                        // name field
 	if (dict[c].def) {												// a colon word
         yield();                                                    // breath before dive in
 		for (IU n=dict[c].len, ip1=0; ip1<n; ip1+=sizeof(IU)) {		// walk through children
