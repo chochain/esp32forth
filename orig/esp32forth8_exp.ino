@@ -30,7 +30,7 @@ template<class T, int N>
 struct List {
     T   *v;             /// fixed-size array storage
     int idx = 0;        /// current index of array
-    
+
     List()  { v = new T[N]; }      /// dynamically allocate array memory
     ~List() { delete[] v;   }      /// free the memory
     T& operator[](int i)   { return i < 0 ? v[idx + i] : v[i]; }
@@ -148,8 +148,8 @@ inline void ADD_WORD(const char *s) { ADD_IU(find(s)); }                        
 ///
 void colon(const char *name) {
     char *nfa = STR(HERE);                  // current pmem pointer
-    int sz = STRLEN(name);					// string length, aligned
-    pmem.push((U8*)name,  sz);				// setup raw name field
+    int sz = STRLEN(name);                  // string length, aligned
+    pmem.push((U8*)name,  sz);              // setup raw name field
     Code c(nfa, [](int){});                 // create a new word on dictionary
     c.def = 1;                              // specify a colon word
     c.len = 0;                              // advance counter (by number of U16)
@@ -228,27 +228,33 @@ void to_s(IU c) {
 ///
 /// recursively disassemble colon word
 ///
-static IU _dovar, _dolit, _dostr, _dotstr, _bran,  _0bran, _donext;
 void see(IU *wp, IU *ip, int dp=0) {
-    IU c = *wp;
-    fout << ENDL; for (int i=dp; i>0; i--) fout << "  ";			// indentation
-    if (dp) fout << "[" << *ip << ": ";          					// ip offset
+    fout << ENDL; for (int i=dp; i>0; i--) fout << "  ";            // indentation
+    if (dp) fout << "[" << setw(2) << *ip << ": ";                  // ip offset
     else    fout << "[ ";
+    IU c = *wp;
     to_s(c);                                                        // name field
-	if (dict[c].def) {												// a colon word
-        yield();                                                    // breath before dive in
-		for (IU n=dict[c].len, ip1=0; ip1<n; ip1+=sizeof(IU)) {		// walk through children
-			IU *wp1 = (IU*)&pmem[dict[c].pfa + ip1];				// wp of next children node
-			see(wp1, &ip1, dp+1);									// dive recursively
-		}
-	}
-    if (c==_dovar || c==_dolit) {
-    	fout << "= " << *(DU*)(wp+1); *ip += sizeof(DU); }
-    else if (c==_dostr || c==_dotstr) {
-    	fout << "= \"" << (char*)(wp+1) << '"';
-    	*ip += STRLEN((char*)(wp+1)); }
-    else if (c==_bran || c==_0bran || c==_donext)  {
-    	fout << "j" << *(wp+1); *ip += sizeof(IU); }
+    if (dict[c].def) {                                              // a colon word
+        for (IU n=dict[c].len, ip1=0; ip1<n; ip1+=sizeof(IU)) {     // walk through children
+            IU *wp1 = (IU*)&pmem[dict[c].pfa + ip1];                // wp of next children node
+            see(wp1, &ip1, dp+1);                                   // dive recursively
+        }
+    }
+    static const char *nlist[7] = {           // even string compare is expensive
+        "dovar", "dolit", "dostr", "dotstr",  // but since see is a user timeframe
+        "branch", "0branch", "donext"         // function, so we can trade time
+    };                                        // with space keeping everything local
+    int i=0;
+    while (i++<7 && strcmp(nlist[i], dict[c].name));
+    switch (i) {
+    case 0: case 1:
+        fout << "= " << *(DU*)(wp+1); *ip += sizeof(DU); break;
+    case 2: case 3:
+        fout << "= \"" << (char*)(wp+1) << '"';
+        *ip += STRLEN((char*)(wp+1)); break;
+    case 4: case 5: case 6:
+        fout << "j" << *(wp+1); *ip += sizeof(IU); break;
+    }
     fout << "] ";
 }
 void words() {
@@ -262,17 +268,13 @@ void ss_dump() {
     fout << top << "> ok" << ENDL;
 }
 void mem_dump(IU p0, U16 sz) {
-    fout << setbase(16) << setfill('0');
+    fout << setbase(16) << setfill(' ');
     for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=0x20) {
-        fout << setw(4) << i << ':';
-        char *p = STR(i);
-        for (int j=0; j<0x20; j++) {
-            fout << setw(2) << (U16)*(p+j);
-            if ((j%4)==3) fout << ' ';
-        }
-        fout << ' ';
+        fout << setw(4) << i << ": ";
+        for (int j=0; j<0x20; j+=2) {
+            IU *n = (IU*)&pmem[i+j]; fout << setw(4) << *n << ' ';}
         for (int j=0; j<0x20; j++) {   // print and advance to next byte
-            char c = *(p+j) & 0x7f;
+            char c = pmem[i+j] & 0x7f;
             fout << (char)((c==0x7f||c<0x20) ? '_' : c);
         }
         fout << ENDL;
@@ -444,13 +446,13 @@ static Code prim[] PROGMEM = {
     CODE("constant",colon(NEXT_WORD()); addlit(POP())),
     CODE("c@",    IU w = POP(); PUSH(BYTE(w));),                 // w -- n
     CODE("c!",    IU w = POP(); BYTE(w) = POP()),
-    CODE("c,",    DU n = POP(); ADD_BYTE(n)), 
+    CODE("c,",    DU n = POP(); ADD_BYTE(n)),
     CODE("w@",    IU w = POP(); PUSH(HALF(w))),                  // w -- n
     CODE("w!",    IU w = POP(); HALF(w) = POP()),
     CODE("w,",    DU n = POP(); ADD_HALF(n)),
     CODE("@",     IU w = POP(); PUSH(CELL(w))),                  // w -- n
     CODE("!",     IU w = POP(); CELL(w) = POP();),               // n w --
-    CODE(",",     DU n = POP(); ADD_DU(n)), 
+    CODE(",",     DU n = POP(); ADD_DU(n)),
     CODE("allot", DU v = 0; for (IU n = POP(), i = 0; i < n; i++) ADD_DU(v)), // n --
     CODE("+!",    IU w = POP(); CELL(w) += POP()),               // n w --
     CODE("?",     IU w = POP(); fout << CELL(w) << " "),         // w --
@@ -494,7 +496,7 @@ static Code prim[] PROGMEM = {
     CODE("setup", DU ch = POP(); DU freq=POP(); ledcSetup(ch, freq, POP())),
     CODE("tone",  DU ch = POP(); ledcWriteTone(ch, POP())),
     /// @}
-    CODE("bye",   exit(0)),
+    CODE("bye",   exit(0)),                   /// soft reboot ESP32
     CODE("boot",  dict.clear(find("boot") + 1); pmem.clear())
 };
 const int PSZ = sizeof(prim)/sizeof(Code);
@@ -505,11 +507,6 @@ void forth_init() {
     for (int i=0; i<PSZ; i++) {              /// copy prim(ROM) into RAM dictionary,
         dict.push(prim[i]);                  /// find() can be modified to support
     }                                        /// searching both spaces
-    /// capture word index for see()
-    _dovar  = find("dovar"),  _dolit  = find("dolit");    // DU
-    _dostr  = find("dostr"),  _dotstr = find("dotstr");	  // STR
-    _bran   = find("branch"), _0bran  = find("0branch");
-    _donext = find("donext");
 }
 ///
 /// outer interpreter
@@ -546,6 +543,8 @@ void forth_outer() {
 ///==========================================================================
 /// ESP32 Web Serer connection and index page
 ///==========================================================================
+//const char *ssid = "Sonic-6af4";
+//const char *pass = "7b369c932f";
 const char *ssid = "Frontier7008";
 const char *pass = "8551666595";
 
@@ -571,7 +570,7 @@ static const char *index_html PROGMEM = R"XX(
 </head>
 <body>
     <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
-         background-color:#f8f0f0;'>ESP32Forth 8.02</div>
+         background-color:#f8f0f0;'>ESP32Forth v8</div>
     <textarea id='tib' style='height:600px;width:400px;'
         onkeydown='if (13===event.keyCode) forth()'>words</textarea>
 </body>
@@ -596,7 +595,7 @@ function chunk(ary, d) {                        // recursive call to sequence PO
             log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
             log.scrollTop=log.scrollHeight      // scroll down
             chunk(ary.splice(30), d+1) }})}     // next 30 lines
-function forth() { 
+function forth() {
     let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
     let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
     chunk(cmd.split('\n'), 1); tib.value = '' }
@@ -719,8 +718,8 @@ void setup() {
     ///
     forth_init();
     forth_load("/load.txt");    // compile \data\load.txt
-    
-    Serial.println("\nesp32forth8 experimental 5");
+
+    Serial.println("\nesp32forth8 experimental 9");
     mem_stat();
 }
 
