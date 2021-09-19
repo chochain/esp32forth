@@ -169,19 +169,19 @@ void nest(IU c) {
         return;
     }
     // is a colon word
-    rs.push((DU)(IP - IP0)); rs.push(WP); WP=c;  // setup call frame
-    IP0 = IP = (U8*)&pmem[dict[c].pfa];
+    rs.push((DU)(IP - IP0)); rs.push(WP);   // setup call frame
+    IP0 = IP = (U8*)&pmem[dict[WP=c].pfa];  // CC: this takes 30ms/1K
     if (rs.idx > rs_max) rs_max = rs.idx;   // keep rs sizing matrics
     try {
         IU n = dict[c].len;                 // CC: this saved 300ms/1M
         while ((int)(IP - IP0) < n) {
-            IU w = *IP; IP += sizeof(IU);   // at the cost of (n, w) on stack
-            nest(w);
+            IU c1 = *IP; IP += sizeof(IU);  // at the cost of (n, w) on stack
+            nest(c1);                       // execute child word
         }                                   // can do IP++ if pmem unit is 16-bit
-        yield();
+        yield();                            // give other tasks some time
     }
     catch(...) {}
-    IP0 = (U8*)&pmem[dict[WP=rs.pop()].pfa]; // restore call frame
+    IP0 = (U8*)&pmem[dict[WP=rs.pop()].pfa];  // restore call frame
     IP  = IP0 + rs.pop();
 }
 ///==============================================================================
@@ -296,8 +296,8 @@ inline char *NEXT_WORD()  { fin >> strbuf; return (char*)strbuf.c_str(); } // ge
 inline char *SCAN(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
 inline DU   PUSH(DU v)    { ss.push(top); return top = v;         }
 inline DU   POP()         { DU n=top; top=ss.pop(); return n;     }
-#define     CODE(s, g)    { s, [&](IU c){ g; }, 0 }
-#define     IMMD(s, g)    { s, [&](IU c){ g; }, 1 }
+#define     CODE(s, g)    { s, [](int c){ g; }, 0 }
+#define     IMMD(s, g)    { s, [](int c){ g; }, 1 }
 #define     BOOL(f)       ((f)?-1:0)
 ///
 /// global memory access macros
