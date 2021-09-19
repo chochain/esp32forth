@@ -99,7 +99,8 @@ List<U8,   64*1024> pmem; /// parameter memory i.e. storage for all colon defini
 bool compile = false;
 DU   top = -1, base = 10;
 DU   ucase = 1;           /// case sensitivity control
-IU   WP = 0, IP = 0;
+IU   WP = 0;              /// current word pointer
+U8   *IP = 0, *IP0 = 0;   /// current instruction pointer and base pointer
 ///
 /// macros to abstract dict and pmem physical implementation
 /// Note:
@@ -107,15 +108,14 @@ IU   WP = 0, IP = 0;
 ///
 #define STRLEN(s) (ALIGN(strlen(s)+1))              /** calculate string size with alignment     */
 #define XIP       (dict[-1].len)                    /** parameter field tail of latest word      */
-#define PFA       (dict[WP].pfa + sizeof(IU) + IP)  /** get parameter field of current word      */
-#define NEXT_OP   (*(IU*)&pmem[dict[WP].pfa + IP])  /** fetch next word, for nest()              */
 #define CELL(a)   (*(DU*)&pmem[a])                  /** fetch a cell from parameter memory       */
 #define HALF(a)   (*(U16*)&pmem[a])                 /** fetch half a cell from parameter memory  */
 #define BYTE(a)   (*(U8*)&pmem[a])                  /** fetch a byte from parameter memory       */
 #define STR(a)    ((char*)&pmem[a])                 /** fetch string pointer to parameter memory */
+#define JMPIP     (IP0 + *(IU*)IP)                  /** branching target address                 */
 #define SETJMP(a) (*(IU*)&pmem[dict[-1].pfa + (a)]) /** address offset for branching opcodes     */
-#define JMPIP     (*(IU*)&pmem[PFA] - sizeof(IU))   /** get jump target address                  */
 #define HERE      (pmem.idx)                        /** current parameter memory index           */
+#define IPOFF     ((IU)(IP - &pmem[0]))             /** IP offset relative parameter memory root */
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
 ///
@@ -156,23 +156,6 @@ void colon(const char *name) {
     c.pfa = HERE;                           // capture code field index
     dict.push(c);                           // deep copy Code struct into dictionary
 };
-void addvar() {                             // add a dovar (variable)
-    DU n = 0;                               // default variable value
-    ADD_WORD("dovar");                      // dovar (+parameter field)
-    ADD_DU(n);                              // data storage (32-bit integer now)
-}
-void addlit(DU n) {                         // add a dolit (constant)
-    ADD_WORD("dolit");                      // dovar (+parameter field)
-    ADD_DU(n);                              // data storage (32-bit integer now)
-}
-void adddotstr(const char *s) {             // print a string
-    ADD_WORD("dotstr");                     // dostr, (+parameter field)
-    ADD_STR(s);                             // byte0, byte1, byte2, ..., byteN
-}
-void addstr(const char *s) {                // add a string
-    ADD_WORD("dostr");                      // dostr, (+parameter field)
-    ADD_STR(s);                             // byte0, byte1, byte2, ..., byteN
-}
 ///
 /// Forth inner interpreter
 ///
@@ -186,17 +169,20 @@ void nest(IU c) {
         return;
     }
     // is a colon word
-    rs.push(WP); rs.push(IP); WP=c; IP=0;   // setup call frame
+    rs.push((DU)(IP - IP0)); rs.push(WP); WP=c;  // setup call frame
+    IP0 = IP = (U8*)&pmem[dict[c].pfa];
     if (rs.idx > rs_max) rs_max = rs.idx;   // keep rs sizing matrics
     try {
-        while (IP < dict[c].len) {          // in instruction range
-            nest(NEXT_OP);                  // fetch/exec instruction from code field
-            IP += sizeof(IU);               // advance to next instruction
+        IU n = dict[c].len;                 // CC: this saved 300ms/1M
+        while ((int)(IP - IP0) < n) {
+            IU w = *IP; IP += sizeof(IU);   // at the cost of (n, w) on stack
+            nest(w);
         }                                   // can do IP++ if pmem unit is 16-bit
         yield();
     }
     catch(...) {}
-    IP = rs.pop(); WP = rs.pop();           // restore call frame
+    IP0 = (U8*)&pmem[dict[WP=rs.pop()].pfa]; // restore call frame
+    IP  = IP0 + rs.pop();
 }
 ///==============================================================================
 ///
@@ -240,12 +226,12 @@ void see(IU *wp, IU *ip, int dp=0) {
             see(wp1, &ip1, dp+1);                                   // dive recursively
         }
     }
-    static const char *nlist[7] = {           // even string compare is expensive
+    static const char *nlist[7] PROGMEM = {   // even string compare is expensive
         "dovar", "dolit", "dostr", "dotstr",  // but since see is a user timeframe
         "branch", "0branch", "donext"         // function, so we can trade time
     };                                        // with space keeping everything local
     int i=0;
-    while (i++<7 && strcmp(nlist[i], dict[c].name));
+    while (i<7 && strcmp(nlist[i], dict[c].name)) i++;
     switch (i) {
     case 0: case 1:
         fout << "= " << *(DU*)(wp+1); *ip += sizeof(DU); break;
@@ -268,6 +254,26 @@ void ss_dump() {
     fout << top << "> ok" << ENDL;
 }
 void mem_dump(IU p0, U16 sz) {
+    fout << setbase(16) << setfill('0');
+    for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=0x20) {
+        fout << setw(4) << i << ':';
+        char *p = STR(i);
+        for (int j=0; j<0x20; j++) {
+            fout << setw(2) << (U16)*(p+j);
+            if ((j%4)==3) fout << ' ';
+        }
+        fout << ' ';
+        for (int j=0; j<0x20; j++) {   // print and advance to next byte
+            char c = *(p+j) & 0x7f;
+            fout << (char)((c==0x7f||c<0x20) ? '_' : c);
+        }
+        fout << ENDL;
+        yield();
+    }
+    fout << setbase(base);
+}
+#if 0
+void mem_dump(IU p0, U16 sz) {
     fout << setbase(16) << setfill(' ');
     for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=0x20) {
         fout << setw(4) << i << ": ";
@@ -282,6 +288,7 @@ void mem_dump(IU p0, U16 sz) {
     }
     fout << setbase(base);
 }
+#endif
 ///
 /// macros to reduce verbosity
 ///
@@ -385,21 +392,27 @@ static Code prim[] PROGMEM = {
     /// @}
     /// @defgroup Literal ops
     /// @{
-    CODE("dovar",   PUSH(PFA);       IP += sizeof(DU)),
-    CODE("dolit",   PUSH(CELL(PFA)); IP += sizeof(DU)),
+    CODE("dovar",   PUSH(IPOFF); IP += sizeof(DU)),
+    CODE("dolit",   PUSH(*(DU*)IP); IP += sizeof(DU)),
     CODE("dostr",
-        const char *s = STR(PFA);           // get string pointer
-        PUSH(PFA); IP += STRLEN(s)),        // put string pfa on stack
+        const char *s = (const char*)IP;            // get string pointer
+        PUSH(IPOFF); IP += STRLEN(s)),
     CODE("dotstr",
-        const char *s = STR(PFA);           // get string pointer
-        fout << s; IP += STRLEN(s)),        // send to output console
+        const char *s = (const char*)IP;            // get string pointer
+        fout << s;  IP += STRLEN(s)),               // send to output console
     CODE("[",       compile = false),
     CODE("]",       compile = true),
     IMMD("(",       SCAN(')')),
     IMMD(".(",      fout << SCAN(')')),
     CODE("\\",      SCAN('\n')),
-    CODE("$\"",     addstr(SCAN('"')+1)),
-    IMMD(".\"",     adddotstr(SCAN('"')+1)),
+    CODE("$\"",
+        const char *s = SCAN('"')+1;        // string skip first blank
+        ADD_WORD("dostr");                  // dostr, (+parameter field)
+        ADD_STR(s)),                        // byte0, byte1, byte2, ..., byteN
+    IMMD(".\"",
+        const char *s = SCAN('"')+1;        // string skip first blank
+        ADD_WORD("dotstr");                 // dostr, (+parameter field)
+        ADD_STR(s)),                        // byte0, byte1, byte2, ..., byteN
     /// @}
     /// @defgroup Branching ops
     /// @brief - if...then, if...else...then
@@ -426,9 +439,8 @@ static Code prim[] PROGMEM = {
     /// @brief  - for...next, for...aft...then...next
     /// @{
     CODE("donext",
-         DU i = rs.pop() - 1;                                    // decrement counter
-         if (i<0) { IP += sizeof(IU);       }                    // break
-         else     { IP = JMPIP; rs.push(i); }),                  // loop back
+        if ((rs[-1] -= 1) >= 0) IP = JMPIP;                      // rs[-1]-=1 saved 2000ms/1M cycles
+        else { IP += sizeof(IU); rs.pop(); }),
     IMMD("for" ,    ADD_WORD(">r"); PUSH(XIP)),                  // for ( -- here )
     IMMD("next",    ADD_WORD("donext"); ADD_IU(POP())),          // next ( here -- )
     IMMD("aft",                                                  // aft ( here -- here there )
@@ -442,8 +454,15 @@ static Code prim[] PROGMEM = {
     CODE("create",  colon(NEXT_WORD());
          ADD_WORD("dovar");                                      // dovar (+parameter field) 
          XIP -= sizeof(DU)),                                     // backup one field
-    CODE("variable",colon(NEXT_WORD()); addvar()),
-    CODE("constant",colon(NEXT_WORD()); addlit(POP())),
+    CODE("variable",                                             // create a variable
+        colon(NEXT_WORD());
+        DU n = 0;                                                // default value
+        ADD_WORD("dovar");                                       // dovar (+parameter field)
+        ADD_DU(n)),                                              // data storage (32-bit integer now)
+    CODE("constant",                                             // create a constant
+        colon(NEXT_WORD());
+        ADD_WORD("dolit");                                       // dovar (+parameter field)
+        ADD_DU(POP())),                                          // data storage (32-bit integer now)
     CODE("c@",    IU w = POP(); PUSH(BYTE(w));),                 // w -- n
     CODE("c!",    IU w = POP(); BYTE(w) = POP()),
     CODE("c,",    DU n = POP(); ADD_BYTE(n)),
@@ -535,7 +554,10 @@ void forth_outer() {
             break;                           ///> skip the entire input buffer
         }
         // is a number
-        if (compile) addlit(n);              /// * add literal when in compile mode
+        if (compile) {                       /// * add literal when in compile mode
+            ADD_WORD("dolit");               ///> dovar (+parameter field)
+            ADD_DU(n);                       ///> data storage (32-bit integer now)
+        }
         else PUSH(n);                        ///> or, add value onto data stack
     }
     if (!compile) ss_dump();
