@@ -201,6 +201,7 @@ using namespace std;    // default to C++ standard template library
 istringstream   fin;    // forth_in
 ostringstream   fout;   // forth_out
 string strbuf;          // input string buffer
+void (*fout_cb)(const char*);  // forth output callback function
 ///
 /// Arduino specific macros
 ///
@@ -521,7 +522,11 @@ void forth_init() {
 ///
 /// outer interpreter
 ///
-void forth_outer() {
+void forth_outer(const char *cmd, void(*callback)(const char*)) {
+    fin.clear();                             /// clear input stream error bit if any
+    fin.str(cmd);                            /// feed user command into input stream
+    fout_cb = callback;                      /// setup callback function
+    fout.str("");                            /// clean output buffer, ready for next run
     while (fin >> strbuf) {
         const char *idiom = strbuf.c_str();
         // printf("%s=>", idiom);
@@ -619,30 +624,26 @@ window.onload = ()=>{ tib.focus() }
 ///
 /// translate ESP32 String to/from Forth input/output streams (in C++ string)
 ///
-static String process_command(String cmd) {
-    fout.str("");                       // clean output buffer, ready for next run
-    fin.clear();                        // clear input stream error bit if any
-    fin.str(cmd.c_str());               // feed user command into input stream
-    forth_outer();                      // invoke outer interpreter
-    return String(fout.str().c_str());  // return response as a String object
-}
+#define LOGF(s)  Serial.print(F(s))
+#define LOG(v)   Serial.print(v)
 ///
 /// Forth bootstrap loader (from Flash)
 ///
 static int forth_load(const char *fname) {
+    auto dummy = [](const char *) { /* do nothing */ };
     if (!SPIFFS.begin()) {
-        Serial.println("Error mounting SPIFFS"); return 1; }
+        LOGF("Error mounting SPIFFS"); return 1; }
     File file = SPIFFS.open(fname, "r");
     if (!file) {
-        Serial.print("Error opening file:"); Serial.println(fname); return 1; }
-    Serial.print("Loading file: "); Serial.print(fname); Serial.print("...");
+        LOGF("Error opening file:"); LOG(fname); return 1; }
+    LOGF("Loading file: "); LOG(fname); LOGF("...");
     while (file.available()) {
-        // retrieve command from Flash memory
-        String cmd = file.readStringUntil('\n');
-        Serial.println("<< "+cmd);  // display bootstrap command on console
-        // send it to Forth command processor
-        process_command(cmd); }
-    Serial.println("Done loading.");
+        char cmd[256], *p = cmd, c;
+        while ((c = file.read())!='\n') *p++ = c;   // one line a time
+        *p = '\0';
+        LOGF("\n<< "); LOG(cmd);                    // show bootstrap command
+        forth_outer(cmd, dummy); }
+    LOGF("Done loading.\n");
     file.close();
     SPIFFS.end();
     return 0;
@@ -651,15 +652,15 @@ static int forth_load(const char *fname) {
 /// memory statistics dump - for heap and stack debugging
 ///
 static void mem_stat() {
-    Serial.print("Core:");          Serial.print(xPortGetCoreID());
-    Serial.print(" heap[maxblk=");  Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    Serial.print(", avail=");        Serial.print(heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    Serial.print(", ss_max=");       Serial.print(ss.max);
-    Serial.print(", rs_max=");       Serial.print(rs.max);
-    Serial.print(", pmem=");         Serial.print(HERE);
-    Serial.print("], lowest[heap="); Serial.print(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
-    Serial.print(", stack=");        Serial.print(uxTaskGetStackHighWaterMark(NULL));
-    Serial.println("]");
+    LOGF("Core:");           LOG(xPortGetCoreID());
+    LOGF(" heap[maxblk=");   LOG(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    LOGF(", avail=");        LOG(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    LOGF(", ss_max=");       LOG(ss.max);
+    LOGF(", rs_max=");       LOG(rs.max);
+    LOGF(", pmem=");         LOG(HERE);
+    LOGF("], lowest[heap="); LOG(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    LOGF(", stack=");        LOG(uxTaskGetStackHighWaterMark(NULL));
+    LOGF("]\n");
     if (!heap_caps_check_integrity_all(true)) {
 //        heap_trace_dump();     // dump memory, if we have to
         abort();                 // bail, on any memory error
@@ -688,23 +689,11 @@ static void handleInput() {
 ///==========================================================================
 /// ESP32 routines
 ///==========================================================================
+String console_cmd;
 void setup() {
     Serial.begin(115200);
     delay(100);
-    //  WiFi.config(ip, gateway, subnet);
-    WiFi.mode(WIFI_STA);
-    // attempt to connect to Wifi network:
-    WiFi.begin(ssid, pass);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print("."); }
-    Serial.println("");
-    Serial.println("WiFi connected");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    // if you get a connection, report back via serial:
-    server.begin();
-    Serial.println("Booting esp32Forth v8.2 ...");
+
     // Setup timer and attach timer to a led pin
     ledcSetup(0, 100, LEDC_TIMER_13_BIT);
     ledcAttachPin(5, 0);
@@ -719,20 +708,31 @@ void setup() {
     digitalWrite(18, LOW);   // motor2 forward
     pinMode(19,OUTPUT);
     digitalWrite(19, LOW);   // motor2 bacward
+    ///
+    /// ForthVM initalization
+    ///
+    LOGF("Booting esp32forth v8.4 ...");
+    forth_init();
+    forth_load("/load.txt");    // compile \data\load.txt
+    
+    //  WiFi.config(ip, gateway, subnet);
+    WiFi.mode(WIFI_STA);
+    // attempt to connect to Wifi network:
+    WiFi.begin(ssid, pass);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print("."); }
+    LOGF("WiFi connected, IP Address: ");
+    LOG(WiFi.localIP());
     // Setup web server handlers
     server.on("/", HTTP_GET, []() {
         server.send(200, "text/html", index_html); });
     server.on("/input", HTTP_POST, handleInput);
     server.begin();
-    Serial.println("HTTP server started");
-    ///
-    /// ForthVM initalization
-    ///
-    forth_init();
-    forth_load("/load.txt");    // compile \data\load.txt
-
-    Serial.println("\nesp32forth8 experimental 9");
+    LOGF("HTTP server started");
     mem_stat();
+    console_cmd.reserve(256);
+    LOGF("\nesp32forth8.4");
 }
 
 void loop(void) {
@@ -743,9 +743,11 @@ void loop(void) {
     /// we also take user input from console (for debugging mostly)
     ///
     // for debugging: we can also take user input from Serial Monitor
+    static auto send_to_con = [](const char *rst) { LOG(rst); };
     if (Serial.available()) {
-        String cmd = Serial.readString();
-        Serial.print(process_command(cmd));   // sent result to console
+        console_cmd = Serial.readString();
+        LOG(console_cmd);
+        forth_outer(console_cmd.c_str(), send_to_con);
         mem_stat();
         delay(2);
     }
