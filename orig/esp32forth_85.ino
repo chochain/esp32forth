@@ -1,526 +1,429 @@
 /******************************************************************************/
-/* ceForth_36.cpp, Version 3.6 : Forth in C                                   */
+/* esp32Forth, Version 8 : for NodeMCU ESP32S                                 */
 /******************************************************************************/
-/* 28sep21cht   version 3.6                                                   */
-/* Primitives/outer coded in C                                                */
-/* 01jul19cht   version 3.3                                                   */
-/* Macro assembler, Visual Studio 2019 Community                              */
-/* 13jul17cht   version 2.3                                                   */
-/* True byte code machine with bytecode                                       */
-/* Change w to WP, pointing to parameter field                                */
-/* 08jul17cht  version 2.2                                                    */
-/* Stacks are 256 cell circular buffers                                       */
-/* Clean up, delete SP@, SP!, RP@, RP!                                        */
-/* 13jun17cht  version 2.1                                                    */
-/* Compiled as a C++ console project in Visual Studio Community 2017          */
-/******************************************************************************/
-#include <string>
-#include <iostream>
-#include <iomanip>      // setw, setbase, ...
+#include <stdlib.h>     // strtol
+#include <exception>    // try...catch, throw (disable for less capable MCU)
+#include "SPIFFS.h"     // flash memory
+#include <WiFi.h>
+#include <sstream>      // iostream, stringstream
+#include <iomanip>      // setbase
+#include <string>       // string class
+using namespace std;
+///
+/// translate ESP32 String to/from Forth input/output streams (in C++ string)
+///
+#define LOGF(s)  Serial.print(F(s))
+#define LOG(v)   Serial.print(v)
+#define LOGH(v)  Serial.print(v, HEX)
 
-# define  FALSE 0
-# define  TRUE  -1
-# define  LOGICAL ? -1 : 0
-# define  LOWER(x,y) ((unsigned long)(x)<(unsigned long)(y))
-# define  pop top = stack[(unsigned char)S--]
-# define  push stack[(unsigned char)++S] = top; top =
-# define  popR rack[(unsigned char)R--]
-# define  pushR rack[(unsigned char)++R]
-# define  ALIGN(sz) ((sz) + (-(sz) & 0x3))
-# define  analogWrite(c,v,mx) ledcWrite((c),(8191/mx)*min((int)(v),mx))
-int  IMEDD = 0x80;
+istringstream   fin;    // forth_in
+ostringstream   fout;   // forth_out
+void (*fout_cb)(const char*);  // forth output callback function
 
-int  P, IP, WP, top, len, nn;
-int  lfa, nfa, cfa, pfa;
-int  DP, thread, context;
-int  ucase = 1, compile = 0, base = 16, loops = 0;
-unsigned char R, S, bytecode, c;
-int* Pointer;
-String idiom, s;
+#define ENDL       endl; fout_cb(fout.str().c_str()); fout.str("")
+#define FALSE      0
+#define TRUE       -1
+#define BOOL(f)    ((f) ? TRUE : FALSE)
+#define ALIGN(sz)  ((sz) + (-(sz) & 0x3))
+#define IMMD_FLAG  0x80
 
-int stack[256] = { 0 };
 int rack[256] = { 0 };
-int data[16000] = {};
-unsigned char* cData = (unsigned char*)data;
+int stack[256] = { 0 };
+unsigned char R = 0, S = 0, bytecode, c;	// CC: bytecode should be U32, c is not used
+int* Pointer;								// CC: Pointer is unused
+int  P, IP, WP, top, len;					// CC: len can be local
+int  lfa, nfa, cfa, pfa;					// CC: pfa is unused; lfa, cfa can be local
+int  DP, lnk, context;						// CC: DP, context and lnk usage are interchangable
+int  ucase = 1, compile = 0, base = 16;
+string idiom, s;                            // CC: s is unused; idiom can be local
 
-void next() { P = data[IP >> 2]; WP = P; IP += 4; }
-void nest() { pushR = IP; IP = WP + 4; next(); }
-void unnest() { IP = popR; next(); }
-void comma(int n) { data[DP >> 2] = n; DP += 4; }
-void comma_s(int lex, String s) {
-  comma(lex); len = s.length(); cData[DP++] = len;
-  for (int i = 0; i < len; i++) { cData[DP++] = s[i]; }
-  while (DP & 3) { cData[DP++] = 0; }
+uint32_t data[1024] = {};
+uint8_t  *cData = (uint8_t*)data;
+
+inline int  popR()       { return rack[(unsigned char)R--]; }
+inline void pushR(int v) { rack[(unsigned char)++R] = v; }
+inline int  pop()        { int n = top; top = stack[(unsigned char)S--]; return n; }
+inline void push(int v)  { stack[(unsigned char)++S] = top; top = v; }
+inline void next()       { P = data[IP >> 2]; WP = P; IP += 4; }
+inline void nest()       { pushR(IP); IP = WP + 4; next(); }
+inline void unnest()     { IP = popR(); next(); }
+inline void comma(int n) { data[DP >> 2] = n; DP += 4; }
+void comma_s(int lex, string s) {
+	comma(lex); len = s.length(); cData[DP++] = len;
+	for (int i = 0; i < len; i++) { cData[DP++] = s[i]; }
+	while (DP & 3) { cData[DP++] = 0; }
 }
-String next_idiom(char delim = 0) {
-  delim = delim ? delim:' '; return Serial.readStringUntil(delim);
+
+string next_idiom(char delim = 0) {
+	string s; delim ? getline(fin, s, delim) : fin >> s; return s;
 }
 void dot_r(int n, int v) {
-  String s = (String)v;
-  for( int i =s.length();i<n;i++) Serial.print(' ');
-  Serial.print(v,base);
+	fout << setw(n) << setfill(' ') << v;
 }
-int find(String s) {
-  int len_s = s.length();
-  nfa = context;
-  while (nfa) {
-    lfa = nfa - 4;
-    len = (int)cData[nfa] & 0x1f;
-    if (len_s == len) {
-      int success = 1;
-      for (int i = 0; i < len; i++) {
-        if (s[i] != cData[nfa + 1 + i])
-        {success = 0; break;}
-      }
-      if (success) {cfa = ALIGN(nfa + len + 1);return cfa; }
-    }
-    nfa = data[lfa >> 2];
-  }
-  return 0;
+int find(string s) {						// CC: nfa, lfa, cfa, len modified
+	int len_s = s.length();
+	nfa = context;
+	while (nfa) {
+        lfa = nfa - 4;           				// CC: 4 = sizeof(IU)
+        len = (int)cData[nfa] & 0x1f;			// CC: 0x1f = ~IMMD_FLAG
+        if (len_s == len) {
+            int success = 1;                    // CC: memcmp
+            for (int i = 0; i < len; i++) {
+                if (s[i] != cData[nfa + 1 + i])
+                {
+                    success = 0; break;
+                }
+            }
+            if (success) { return cfa = ALIGN(nfa + len + 1); }
+        }
+        nfa = data[lfa >> 2];
+	}
+	return 0;
 }
 void words() {
-  Serial.println();
-  nfa = context; // CONTEXT
-  while (nfa) {
-    lfa = nfa - 4;
-    len = (int)cData[nfa] & 0x1f;
-    for (int i = 0; i < len; i++)
-      Serial.print((char)cData[nfa + 1 + i]);
-    Serial.print(' ');
-    nfa = data[lfa >> 2];
-  }
-  Serial.println();
+	int n = 0;
+	nfa = context; // CONTEXT
+	while (nfa) {
+        lfa = nfa - 4;
+        len = (int)cData[nfa] & 0x1f;
+        for (int i = 0; i < len; i++)
+            fout << cData[nfa + 1 + i];
+        if ((++n%10)==0) { fout << ENDL; } 
+        else             { fout << ' ';  }
+        nfa = data[lfa >> 2];
+	}
+	fout << ENDL;
 }
-void CheckSum() {
-  int i; pushR = P; char sum = 0;
-  Serial.print(P,base);Serial.print(": ");
-  for (i = 0; i < 16; i++) {
-    sum += cData[P];
-    if ((int)cData[P]<16) Serial.print(' ');
-    Serial.print((int)cData[P++],base);Serial.print(' ');
-  }
-  if ((sum&0xff)<16) Serial.print(' ');
-  Serial.print(sum & 0xff, base);Serial.print("  ");
-  P = popR;
-  for (i = 0; i < 16; i++) {
-    sum = cData[P++] & 0x7f;
-    Serial.print((char)(sum < 0x20) ? '_' : sum);
-  }
-  Serial.println();
+void CheckSum() {                            // CC: P updated, but used as a local variable
+    char sum = 0;
+    pushR(P);
+	fout << setw(4) << setbase(16) << P << ": ";
+	for (int i = 0; i < 16; i++) {
+        sum += cData[P];
+        fout << setw(2) << (int)cData[P++] << ' ';
+	}
+	fout << setw(4) << (sum & 0xff) << "  ";
+	P = popR();
+	for (int i = 0; i < 16; i++) {
+        sum = cData[P++] & 0x7f;
+        fout << (char)((sum < 0x20) ? '_' : sum);
+	}
+	fout << ENDL;
 }
-void dump() {// a n --
-  Serial.println();
-  len = top / 16; pop; P = top; pop;
-  for (int i = 0; i < len; i++) { CheckSum(); }
+void dump() {  // a n --                       // CC: P updated, but used as a local variable
+    int sz = pop() / 16;
+    P = pop();
+	fout << ENDL;
+	for (int i = 0; i < sz; i++) { CheckSum(); }
 }
 void ss_dump() {
-  Serial.print("\n< "); 
-  for (int i = S - 4; i < S + 1; i++) { 
-  Serial.print(stack[i],base);Serial.print(" "); }
-  Serial.print(top,base);Serial.println(" >ok");
+	fout << "< "; for (int i = S - 4; i < S + 1; i++) { fout << stack[i] << " "; }
+	fout << top << " >ok" << ENDL;
 }
-void(*primitives[120])(void) = {
-  /// Stack ops
-  /* -1 "ret" */ [] {next(); },
-  /* 0 "opn" */ [] {},
-  /* 1 "nest" */ [] {nest(); },
-  /* 2 "unnest" */ [] {unnest(); },
-  /* 3 "dup" */ [] {stack[++S] = top; },
-  /* 4 "drop" */ [] {pop; },
-  /* 5 "over" */ [] {push stack[(S - 1)]; },
-  /* 6 "swap" */ [] {nn = top; top = stack[S];
-  stack[S] = nn; },
-  /* 7 "rot" */ [] {nn = stack[(S - 1)];
-  stack[(S - 1)] = stack[S];
-  stack[S] = top; top = nn; },
-  /* 8 "pick" */ [] {top = stack[(S - top)]; },
-  /* 9 ">r" */ [] {rack[++R] = top; pop; },
-  /* 10 "r>" */ [] {push rack[R--]; },
-  /* 11 "r@" */ [] {push rack[R]; },
-  /// Stack ops - double
-  /* 12 "2dup" */ [] {push stack[(S - 1)]; push stack[(S - 1)]; },
-  /* 13 "2drop" */ [] {pop; pop; },
-  /* 14 "2over"*/ [] {push stack[(S - 3)]; push stack[(S - 3)]; },
-  /* 15 "2swap" */ [] {
-  int n = top; pop; int m = top; pop; int l = top; pop; int i = top; pop;
-  push m; push n; push i; push l; },
-  /// ALU ops
-  /* 16 "+" */ [] {nn = top; pop; top += nn; },
-  /* 17 "-" */ [] {nn = top; pop; top -= nn; },
-  /* 18 "*" */ [] {nn = top; pop; top *= nn; },
-  /* 19 "/" */ [] {nn = top; pop; top /= nn; },
-  /* 20 "mod" */ [] {nn = top; pop; top %= nn; },
-  /* 21 "* /" */ [] {nn = top; pop; int m = top; pop;
-  int l = top; pop; push(m * l) / nn; },
-  /* 22 "/mod" */ [] {nn = top; pop; int m = top; pop;
-  push(m % nn); push(m / nn); },
-  /* 23 "* /mod" */ [] {nn = top; pop; int m = top; pop;
-  int l = top; pop; push((m * l) % nn); push((m * l) / nn); },
-  /* 24 "and" */ [] {top &= stack[S--]; },
-  /* 25 "or"  */ [] {top |= stack[S--]; },
-  /* 26 "xor" */ [] {top ^= stack[S--]; },
-  /* 27 "abs" */ [] {top = abs(top); },
-  /* 28 "negate" */ [] {top = -top; },
-  /* 29 "max" */ [] {nn = top; pop; top = std::max(top, nn); },
-  /* 30 "min" */ [] {nn = top; pop; top = std::min(top, nn); },
-  /* 31 "2*"  */ [] {top *= 2; },
-  /* 32 "2/"  */ [] {top /= 2; },
-  /* 33 "1+"  */ [] {top += 1; },
-  /* 34 "1-"  */ [] {top += -1; },
-  /// Logic ops
-  /* 35 "0=" */ [] {top = (top == 0) LOGICAL; },
-  /* 36 "0<" */ [] {top = (top < 0) LOGICAL; },
-  /* 37 "0>" */ [] {top = (top > 0) LOGICAL; },
-  /* 38 "="  */ [] {nn = top; pop; top = (top == nn) LOGICAL; },
-  /* 39 ">"  */ [] {nn = top; pop; top = (top > nn) LOGICAL; },
-  /* 40 "<"  */ [] {nn = top; pop; top = (top < nn) LOGICAL; },
-  /* 41 "<>" */ [] {nn = top; pop; top = (top != nn) LOGICAL; },
-  /* 42 ">=" */ [] {nn = top; pop; top = (top >= nn) LOGICAL; },
-  /* 43 "<=" */ [] {nn = top; pop; top = (top <= nn) LOGICAL; },
-  /// IO ops
-  /* 44 "base@" */ [] {push base; },
-  /* 45 "base!" */ [] {base = top; pop;  },
-  /* 46 "hex" */ [] {base = 16;  },
-  /* 47 "decimal" */ [] {base = 10; },
-  /* 48 "cr" */ [] {Serial.println(); },
-  /* 49 "." */ [] {Serial.print(top,base);Serial.print(" "); pop; },
-  /* 50 ".r" */ [] {nn = top; pop; dot_r(nn, top); pop; },
-  /* 51 "u.r" */ [] {nn = top; pop; dot_r(nn, abs(top)); pop; },
-  /* 52 ".s" */ [] {ss_dump(); },
-  /* 53 "key" */ [] {push(next_idiom()[0]); },
-  /* 54 "emit" */ [] {char b = (char)top; pop; Serial.print(b); },
-  /* 55 "space" */ [] {Serial.print(' '); },
-  /* 56 "spaces" */ [] {nn = top; pop; for (int i = 0; i < nn; i++) Serial.print(' '); },
-  /// Literal ops
-  /* 57 "dostr" */ [] {int p = IP; push p; len = cData[p];
-  p += (len + 1); p += (-p & 3); IP = p; },
-  /* 58 "dotstr" */ [] {int p = IP; len = cData[p++];
-  for (int i = 0; i < len; i++) Serial.print((char)cData[p++]);
-  p += (-p & 3); IP = p; },
-  /* 59 "dolit" */ [] {push data[IP >> 2]; IP += 4; },
-  /* 60 "dovar" */ [] {push nn + 4; },
-  /* 61 [  */ [] {compile = 0; },
-  /* 62 ]  */ [] {compile = 1; },
-  /* 63 (  */ [] {next_idiom(')'); },
-  /* 64 .( */ [] {Serial.print(next_idiom(')')); },
-  /* 65 \  */ [] {next_idiom('\n'); },
-  /* 66 $" */ [] {
-  String s = next_idiom('"'); len = s.length();
-  nn = find("dostr");
-  comma_s(nn, s); },
-  /* 67 ." */ [] {
-  String s = next_idiom('"'); len = s.length();
-  nn = find("dotstr");
-  comma_s(nn, s); },
-  /// Branching ops
-  /* 68 "branch" */ [] { IP = data[IP >> 2]; next(); },
-  /* 69 "0branch" */ [] {
-  if (top == 0) IP = data[IP >> 2];
-  else IP += 4;  pop; next(); },
-  /* 70 "donext" */ [] {
-  if (rack[R]) {
-  rack[R] -= 1; IP = data[IP >> 2];
-  }
-  else { IP += 4;  R--; }
-  next(); },
-  /* 71 "if" */ [] {
-  comma(find("0branch")); push DP;
-  comma(0); },
-  /* 72 "else" */ [] {
-  comma(find("branch")); data[top >> 2] = DP + 4;
-  top = DP; comma(0);  },
-  /* 73 "then" */ [] {
-  data[top >> 2] = DP; pop; },
-  /// Loops
-  /* 74 "begin" */ [] { push DP; },
-  /* 75 "while" */ [] {
-  comma(find("0branch")); push DP;
-  comma(0); },
-  /* 76 "repeat" */ [] {
-  comma(find("branch")); nn = top; pop;
-  comma(top); pop; data[nn >> 2] = DP; },
-  /* 77 "again" */ [] {
-  comma(find("branch"));
-  comma(top); pop; },
-  /* 78 "until" */ [] {
-  comma(find("0branch"));
-  comma(top); pop; },
-  ///  For loops
-  /* 79 "for" */ [] {comma((find(">r"))); push DP; },
-  /* 80 "aft" */ [] {pop;
-  comma((find("branch"))); comma(0); push DP; push DP - 4; },
-  /* 81 "next" */ [] {
-  comma(find("donext")); comma(top); pop; },
-  ///  Compiler ops
-  /* 82 "exit" */ [] {IP = popR; next(); },
-  /* 83 "docon" */ [] {push data[(nn + 4) >> 2]; },
-  /* 84 ":" */ [] {
-  String s = next_idiom();
-  thread = DP + 4; comma_s(context, s);
-  comma(cData[find("nest")]); compile = 1; },
-  /* 85 ";" */ [] {
-  context = thread; compile = 0;
-  comma(find("unnest")); },
-  /* 86 "variable" */ [] {
-  String s = next_idiom();
-  thread = DP + 4; comma_s(context, s);
-  context = thread;
-  comma(cData[find("dovar")]); comma(0);
-  },
-  /* 87 "constant" */ [] {
-  String s = next_idiom();
-  thread = DP + 4; comma_s(context, s);
-  context = thread;
-  comma(cData[find("docon")]); comma(top); pop; },
-  /* 88 "@" */ [] {top = data[top >> 2]; },
-  /* 89 "!" */ [] {int a = top; pop; data[a >> 2] = top; pop; },
-  /* 90 "?" */ [] {Serial.print(data[top >> 2],base);Serial.print(" "); pop; },
-  /* 91 "+!" */ [] {int a = top; pop; data[a >> 2] += top; pop; },
-  /* 92 "allot" */ [] {nn = top; pop;
-  for (int i = 0; i < nn; i++) cData[DP++] = 0; },
-  /* 93 "," */ [] {comma(top); pop; },
-  /// metacompiler
-  /* 94 "create" */ [] {
-  String s = next_idiom();
-  thread = DP + 4; comma_s(context, s);
-  context = thread;
-  comma(find("nest")); comma(find("dovar")); },
-  /* 95 "does" */ [] {
-  comma(find("nest")); }, // copy words after "does" to new the word
-  /* 96 "to" */ [] {// n -- , compile only
-  int n = find(next_idiom());
-  data[(cfa + 4) >> 2] = top; pop; },
-  /* 97 "is" */ [] {// w -- , execute only
-  int n = find(next_idiom());
-  data[cfa >> 2] = top; pop; },
-  /* 98 "[to]" */ [] {
-  int n = data[IP >> 2]; data[(n + 4) >> 2] = top; pop; },
-  /// Debug ops
-  /* 99 "bye" */ [] {exit(0); },
-  /* 100 "here" */ [] {push DP; },
-  /* 101 "words" */ [] {words(); },
-  /* 102 "dump" */ [] {dump(); },
-  /* 103 "'" */ [] {push find(next_idiom()); },
-  /* 104 "see" */ [] {
-  nn = find(next_idiom());
-  for (int i = 0; i < 20; i++) Serial.print(data[(nn >> 2) + i],base);
-  Serial.println(); },
-  /* 105 "ucase" */ [] {ucase = top; pop; },
-  /* 106 "clock" */ [] {push millis(); },
-  /* 107 "delay" */ [] {delay(top);pop; },
-  /* 108 "poke" */ [] {Pointer = (int*)top; *Pointer = stack[(unsigned char)S--]; pop; },
-  /* 109 "peek" */ [] {Pointer = (int*)top; top = *Pointer; },
-  /* 110 "pin"  */ [] {top=digitalRead(top); },
-  /* 111 "in" */ [] {Pointer = (int*)top; *Pointer = stack[(unsigned char)S--]; pop; },
-  /* 112 "out" */ [] {int p = top;pop; digitalWrite(p, top);pop; },
-  /* 113 "adc"  */ [] {top = (int) analogRead(top); },
-  /* 114 "duty" */ [] {nn=top; pop; analogWrite(nn,top,255); pop; },
-  /* 115 "attach"  */ [] {nn=top; pop; ledcAttachPin(top,nn); pop; },
-  /* 116 "setup" */ [] {nn=top; pop; int freq=top;pop;ledcSetup(nn,freq,top); pop; },
-  /* 117 "tone" */ [] {nn=top; pop; ledcWriteTone(nn,top); pop; },
-  /* 118 "boot" */ [] {DP = find("boot") + 4; lfa = nfa; }
+
+// Macro Assembler
+///
+/// Code - data structure to keep primitive definitions
+///
+struct Code {
+    string name;
+    void   (*xt)(void);
+    int    immd;
 };
-// outer interpreter
-void CODE(int lex, const char seq[]) {
-  len = lex & 31;
-  comma(lfa); lfa = DP; cData[DP++] = lex;
-  for (int i = 0; i < len; i++) { cData[DP++] = seq[i]; }
-  while (DP & 3) { cData[DP++] = 0; }
-  comma(P++); /// sequential bytecode
-  Serial.print(seq);Serial.print(":");Serial.print(P - 1,base);Serial.print(',');
-  Serial.print(DP - 4,base);Serial.print(' ');
+#define CODE(s, g)  { s, []{ g; }, 0 }
+#define IMMD(s, g)  { s, []{ g; }, IMMD_FLAG }
+static struct Code primitives[] PROGMEM = {
+    /// Execution flow ops
+	CODE("ret",   next()),
+	CODE("nop",   {}),
+	CODE("nest",  nest()),
+	CODE("unnest",unnest()),
+	/// Stack ops
+	CODE("dup",   stack[++S] = top),
+	CODE("drop",  pop()),
+	CODE("over",  push(stack[(S - 1)])),
+	CODE("swap",  int n = top; top = stack[S]; stack[S] = n),
+	CODE("rot",
+         int n = stack[(S - 1)];
+         stack[(S - 1)] = stack[S];
+         stack[S] = top; top = n),
+	CODE("pick",  top = stack[(S - top)]),
+	CODE(">r",    rack[++R] = pop()),
+	CODE("r>",    push(rack[R--])),
+	CODE("r@",    push(rack[R])),
+	/// Stack ops - double
+	CODE("2dup",  push(stack[(S - 1)]); push(stack[(S - 1)])),
+	CODE("2drop", pop; pop),
+	CODE("2over", push(stack[(S - 3)]); push(stack[(S - 3)])),
+	CODE("2swap", 
+         int n = pop(); int m = pop(); int l = pop(); int i = pop();
+         push(m); push(n); push(i); push(l)),
+	/// ALU ops
+	CODE("+",     int n = pop(); top += n),
+	CODE("-",     int n = pop(); top -= n),
+	CODE("*",     int n = pop(); top *= n),
+	CODE("/",     int n = pop(); top /= n),
+	CODE("mod",   int n = pop(); top %= n),
+	CODE("*/",
+         int n = pop(); int m = pop(); int l = pop();
+         push(m*l/n)),
+	CODE("/mod",
+         int n = pop(); int m = pop();
+         push(m % n); push(m / n)),
+	CODE("*/mod",
+         int n = pop(); int m = pop();
+         int l = pop(); push((m * l) % n); push((m * l) / n)),
+	CODE("and",   top &= stack[S--]),
+	CODE("or",    top |= stack[S--]),
+	CODE("xor",   top ^= stack[S--]),
+	CODE("abs",   top = abs(top)),
+	CODE("negate",top = -top),
+	CODE("max",   int n = pop(); top = max(top, n)),
+	CODE("min",   int n = pop(); top = min(top, n)),
+	CODE("2*",    top *= 2),
+	CODE("2/",    top /= 2),
+	CODE("1+",    top += 1),
+	CODE("1-",    top -= 1),
+	/// Logic ops
+	CODE("0=",    top = BOOL(top == 0)),
+    CODE("0<",    top = BOOL(top < 0)),
+	CODE("0>",    top = BOOL(top > 0)),
+	CODE("=",     int n = pop(); top = BOOL(top == n)),
+	CODE(">",     int n = pop(); top = BOOL(top > n)),
+	CODE("<",     int n = pop(); top = BOOL(top < n)),
+	CODE("<>",    int n = pop(); top = BOOL(top != n)),
+	CODE(">=",    int n = pop(); top = BOOL(top >= n)),
+	CODE("<=",    int n = pop(); top = BOOL(top <= n)),
+	/// IO ops
+	CODE("base@", push(base)),
+	CODE("base!", base = pop(); fout << setbase(base)),
+	CODE("hex",   base = 16; fout << setbase(base)),
+	CODE("decimal", base = 10; fout << setbase(base)),
+	CODE("cr",    fout << ENDL),
+	CODE(".",     fout << top << " "; pop),
+	CODE(".r",    int n = pop(); dot_r(n, top); pop),
+	CODE("u.r",   int n = pop(); dot_r(n, abs(top)); pop),
+	CODE(".s",    ss_dump()),
+	CODE("key",   push(next_idiom()[0])),
+	CODE("emit",  char b = (char)pop(); fout << b),
+	CODE("space", fout << " "),
+	CODE("spaces",int n = pop(); for (int i = 0; i < n; i++) fout << " "),
+	/// Literal ops
+	CODE("dostr",
+         int p = IP; push(p); len = cData[p];
+         p += (len + 1); p += (-p & 3); IP = p),
+	CODE("dotstr",
+         int p = IP; len = cData[p++];
+         for (int i = 0; i < len; i++) fout << cData[p++];
+         p += (-p & 3); IP = p),
+	CODE("dolit", push(data[IP >> 2]); IP += 4),
+	CODE("dovar", push(WP + 4)),
+	IMMD("[",     compile = 0),
+	CODE("]",     compile = 1),
+    IMMD("(",     next_idiom(')')),
+    IMMD(".(",    fout << next_idiom(')')),
+    IMMD("\\",    next_idiom('\n')),
+    IMMD("$*",    comma_s(find("dostr"), next_idiom('"'))),
+    IMMD(".\"",   comma_s(find("dotstr"), next_idiom('"'))),
+	/// Branching ops
+	CODE("branch", IP = data[IP >> 2]; next()),
+	CODE("0branch",
+         if (top == 0) IP = data[IP >> 2];
+         else IP += 4;
+         pop(); next()),
+	CODE("donext",
+         if (rack[R]) {
+             rack[R] -= 1; IP = data[IP >> 2];
+         }
+         else { IP += 4;  R--; }
+         next()),
+	IMMD("if", comma(find("0branch")); comma(0); push(DP)),
+    IMMD("else",
+         comma(find("branch")); data[top >> 2] = DP + 4;
+         top = DP; comma(0)),
+    IMMD("then", data[top >> 2] = DP; pop()),
+	/// Loops
+	IMMD("begin",  push(DP)),
+    IMMD("while",  comma(find("0branch")); comma(0); push(DP)),
+    IMMD("repeat",
+         comma(find("branch")); int n = pop();
+         comma(pop()); data[n >> 2] = DP),
+	IMMD("again",  comma(find("branch")); comma(pop())),
+    IMMD("until",  comma(find("0branch")); comma(pop())),
+	///  For loops
+	IMMD("for", comma((find(">r"))); push(DP)),
+	IMMD("aft",
+         pop();
+         comma((find("branch"))); comma(0); push(DP); push(DP - 4)),
+    IMMD("next",   comma(find("donext")); comma(pop())),
+	///  Compiler ops
+	CODE("exit",  IP = popR(); next()),
+	CODE("docon", push(data[(WP + 4) >> 2])),
+    CODE(":",
+         string s = next_idiom();
+         lnk = DP + 4; comma_s(context, s);
+         comma(cData[find("nest")]); compile = 1),
+	IMMD(";",
+         context = lnk; compile = 0;
+         comma(find("unnest"))),
+	CODE("variable", 
+         string s = next_idiom();
+         lnk = DP + 4; comma_s(context, s);
+         context = lnk;
+         comma(cData[find("dovar")]); comma(0)),
+	CODE("constant",
+         string s = next_idiom();
+         lnk = DP + 4; comma_s(context, s);
+         context = lnk;
+         comma(cData[find("docon")]); comma(pop())),
+	CODE("@",  top = data[top >> 2]),
+	CODE("!",  int a = pop(); data[a >> 2] = pop()),
+	CODE("?",  fout << data[pop() >> 2] << " "),
+	CODE("+!", int a = pop(); data[a >> 2] += pop()),
+	CODE("allot",
+         int n = pop();
+         for (int i = 0; i < n; i++) cData[DP++] = 0),
+	CODE(",",  comma(pop())),
+	/// metacompiler
+	CODE("create",
+         string s = next_idiom();
+         lnk = DP + 4; comma_s(context, s);
+         context = lnk;
+         comma(find("nest")); comma(find("dovar"))),
+	CODE("does", comma(find("nest"))), // copy words after "does" to new the word
+	CODE("to",                         // n -- , compile only
+         int n = find(next_idiom());
+         data[(cfa + 4) >> 2] = pop()),
+	CODE("is",                         // w -- , execute only
+         int n = find(next_idiom());
+         data[cfa >> 2] = pop()),
+	CODE("[to]",
+         int n = data[IP >> 2]; data[(n + 4) >> 2] = pop()),
+	/// Debug ops
+	CODE("bye",   exit(0)),
+	CODE("here",  push(DP)),
+	CODE("words", words()),
+	CODE("dump",  dump()),
+	CODE("'" ,    push(find(next_idiom()))),
+	CODE("see",
+         int n = find(next_idiom());
+         for (int i = 0; i < 20; i++) fout << data[(n >> 2) + i];
+         fout << ENDL),
+	CODE("ucase", ucase = pop()),
+    CODE("clock", push(millis())),
+    CODE("boot",  DP = find("boot") + 4; lnk = nfa)
+};
+
+void encode(struct Code *prim) {
+    const char *seq = prim->name.c_str();
+	int sz = prim->name.length();
+	comma(lnk);                     // CC: link field (U32 now)
+	lnk = DP;
+	cData[DP++] = sz | prim->immd;	// CC: attribute byte = length(0x1f) + immediate(0x80)
+	for (int i = 0; i < sz; i++) { cData[DP++] = seq[i]; }
+	while (DP & 3) { cData[DP++] = 0; }
+	comma(P++); 					/// CC: cfa = sequential bytecode (U32 now)
+	LOGH(P-1); LOGF(":"); LOGH(DP-4); LOGF(" "); LOG(seq); LOG("\n");
 }
-void run(int n) {
-  P = n; WP = n; IP = 0; R = 0;
-  do {
-    bytecode = cData[P++];
-    primitives[bytecode](); /// execute colon
-  } while (R != 0);
+
+void run(int n) {					/// inner interpreter, CC: P, WP, IP, R, bytecode modified
+	P = n; WP = n; IP = 0; R = 0;
+	do {
+        bytecode = cData[P++];		/// CC: bytecode is U8, storage is U32, using P++ is incorrect
+        primitives[bytecode].xt();	/// execute colon
+	} while (R != 0);
 }
-void outer() {
-  while (true) {
-    idiom = Serial.readStringUntil(' ');
-    if (idiom.length()==0) return;
-    if (idiom[0]=='\n') {ss_dump();return;}
-    if (find(idiom)) {
-      if (compile && (((int)cData[nfa] & 0x80) == 0))
-        comma(cfa);
-      else  run(cfa);
+
+void forth_outer(const char *cmd, void(*callback)(const char*)) {
+    fin.clear();                    /// clear input stream error bit if any
+    fin.str(cmd);                   /// feed user command into input stream
+    fout_cb = callback;             /// setup callback function
+    fout.str("");                   /// clean output buffer, ready for next run
+	while (fin >> idiom) {
+        if (find(idiom)) {
+            if (compile && ((cData[nfa] & IMMD_FLAG)==0))
+                comma(cfa);
+            else run(cfa);
+        }
+        else {
+            char* p;
+            int n = (int)strtol(idiom.c_str(), &p, base);
+            if (*p != '\0') {                   ///  not number
+                fout << idiom << "? " << ENDL;  ///  display error prompt
+                compile = 0;                    ///  reset to interpreter mode
+                getline(fin, idiom, '\n');      ///  skip the entire line
+            }
+            else {
+                if (compile) { comma(find("dolit")); comma(n); }
+                else { push(n); }
+            }
+        }
+	}
+    if (!compile) ss_dump();        ///  * dump stack and display ok prompt
+}
+
+void forth_init() {
+	cData = (unsigned char*)data;
+	IP = 0; lnk = 0; P = 0;
+	S = 0; R = 0;
+
+	for (int i=0; i<sizeof(primitives)/sizeof(Code); i++) encode(&primitives[i]);
+
+	context = DP - 12;
+
+	// Boot Up
+	P = 0; WP = 0; IP = 0; S = 0; R = 0;
+	top = -1;
+}
+
+///==========================================================================
+/// ForthVM front-end handlers
+///==========================================================================
+///
+/// memory statistics dump - for heap and stack debugging
+///
+static void mem_stat() {
+    LOGF("Core:");           LOG(xPortGetCoreID());
+    LOGF(" heap[maxblk=");   LOG(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    LOGF(", avail=");        LOG(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    LOGF(", pmem=");         LOG(context);
+    LOGF("], lowest[heap="); LOG(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    LOGF(", stack=");        LOG(uxTaskGetStackHighWaterMark(NULL));
+    LOGF("]\n");
+    if (!heap_caps_check_integrity_all(true)) {
+//        heap_trace_dump();     // dump memory, if we have to
+        abort();                 // bail, on any memory error
     }
-    else {
-      char* p;
-      int n = (int)strtol(idiom.c_str(), &p, base);
-     if (*p != '\0') {///  not number
-        Serial.print(idiom);Serial.println("? ");
-        compile = 0; return;
-      }
-      else {
-        if (compile) { comma(find("dolit")); comma(n); }
-        else { push n; }
-      }
-    }
-    if (Serial.peek() == '\0' && !compile) ss_dump();
-  } ///  * dump stack and display ok prompt
 }
-///  Main Program
+///==========================================================================
+/// ESP32 routines
+///==========================================================================
+String console_cmd;
 void setup() {
-  Serial.begin(115200);
-  delay(100);
-  cData = (unsigned char*)data;
-  IP = 0; lfa = 0; P = 0;
-  S = 0; R = 0;
-  Serial.println("Build dictionary");
-  // Kernel
-  CODE(3, "ret");
-  CODE(3, "nop");
-  CODE(4, "nest");
-  CODE(6, "unnest");
-  CODE(3, "dup");
-  CODE(4, "drop");
-  CODE(4, "over");
-  CODE(4, "swap");
-  CODE(3, "rot");
-  CODE(4, "pick");
-  CODE(2, ">r");
-  CODE(2, "r>");
-  CODE(2, "r@");
-  CODE(4, "2dup");
-  CODE(5, "2drop");
-  CODE(5, "2over");
-  CODE(5, "2swap");
-  CODE(1, "+");
-  CODE(1, "-");
-  CODE(1, "*");
-  CODE(1, "/");
-  CODE(3, "mod");
-  CODE(2, "*/");
-  CODE(4, "/mod");
-  CODE(5, "*/mod");
-  CODE(3, "and");
-  CODE(2, "or");
-  CODE(3, "xor");
-  CODE(3, "abs");
-  CODE(6, "negate");
-  CODE(3, "max");
-  CODE(3, "min");
-  CODE(2, "2*");
-  CODE(2, "2/");
-  CODE(2, "1+");
-  CODE(2, "1-");
-  CODE(2, "0=");
-  CODE(2, "0<");
-  CODE(2, "0>");
-  CODE(1, "=");
-  CODE(1, ">");
-  CODE(1, "<");
-  CODE(2, "<>");
-  CODE(2, ">=");
-  CODE(2, "<=");
-  CODE(5, "base@");
-  CODE(5, "base!");
-  CODE(3, "hex");
-  CODE(7, "decimal");
-  CODE(2, "cr");
-  CODE(1, ".");
-  CODE(2, ".r");
-  CODE(3, "u.r");
-  CODE(2, ".s");
-  CODE(3, "key");
-  CODE(4, "emit");
-  CODE(5, "space");
-  CODE(6, "spaces");
-  CODE(5, "dostr");
-  CODE(6, "dotstr");
-  CODE(5, "dolit");
-  CODE(5, "dovar");
-  CODE(1 + IMEDD, "[");
-  CODE(1, "]");
-  CODE(1 + IMEDD, "(");
-  CODE(2 + IMEDD, ".(");
-  CODE(1 + IMEDD, "\\");
-  CODE(2 + IMEDD, "$\"");
-  CODE(2 + IMEDD, ".\"");
-  CODE(6, "branch");
-  CODE(7, "0branch");
-  CODE(6, "donext");
-  CODE(2 + IMEDD, "if");
-  CODE(4 + IMEDD, "else");
-  CODE(4 + IMEDD, "then");
-  CODE(5 + IMEDD, "begin");
-  CODE(5 + IMEDD, "while");
-  CODE(6 + IMEDD, "repeat");
-  CODE(5 + IMEDD, "again");
-  CODE(5 + IMEDD, "until");
-  CODE(3 + IMEDD, "for");
-  CODE(3 + IMEDD, "aft");
-  CODE(4 + IMEDD, "next");
-  CODE(4, "exit");
-  CODE(5, "docon");
-  CODE(1, ":");
-  CODE(1 + IMEDD, ";");
-  CODE(8, "variable");
-  CODE(8, "constant");
-  CODE(1, "@");
-  CODE(1, "!");
-  CODE(1, "?");
-  CODE(2, "+!");
-  CODE(5, "allot");
-  CODE(1, ",");
-  CODE(6, "create");
-  CODE(4, "does");
-  CODE(2, "to");
-  CODE(2, "is");
-  CODE(4, "[to]");
-  CODE(3, "bye");
-  CODE(4, "here");
-  CODE(5, "words");
-  CODE(4, "dump");
-  CODE(1, "'");
-  CODE(3, "see");
-  CODE(5, "ucase");
-  CODE(5, "clock");
-  CODE(5, "delay");
-  CODE(4, "poke");
-  CODE(4, "peek");
-  CODE(3, "pin");
-  CODE(2, "in");
-  CODE(3, "out");
-  CODE(3, "adc");
-  CODE(4, "duty");
-  CODE(6, "attach");
-  CODE(5, "setup");
-  CODE(4, "tone");
-  CODE(4, "boot");
-  context = DP - 12;
-  Serial.print("\n\nPointers DP=");Serial.print(DP,base);Serial.print(" lfa=");
-  Serial.print(context,base);Serial.print(" Words=");Serial.println(P,base);
-// Setup ESP32 pins
-  ledcSetup(0, 100, 13);
-  ledcAttachPin(5, 0);
-  analogWrite(0, 250, 255);
-  pinMode(2,OUTPUT);
-  digitalWrite(2, HIGH);   // turn the LED2 on
-  pinMode(16,OUTPUT);
-  digitalWrite(16, LOW);   // motor1 forward
-  pinMode(17,OUTPUT);
-  digitalWrite(17, LOW);   // motor1 backward
-  pinMode(18,OUTPUT);
-  digitalWrite(18, LOW);   // motor2 forward
-  pinMode(19,OUTPUT);
-  digitalWrite(19, LOW);   // motor2 bacward
-// dump dictionary
-  Serial.print("\nDump dictionary\n");
-  P = 0;
-  for (len = 0; len < 110; len++) { CheckSum(); }
-  ledcSetup(0,   0, 13);
-// Boot Up
-  P = 0; WP = 0; IP = 0; S = 0; R = 0;
-  top = -1;
-  Serial.print("\nceForth v8.5, 30sep21cht\n");
-  words();
+    Serial.begin(115200);
+    delay(100);
+    ///
+    /// ForthVM initalization
+    ///
+    LOGF("\nBooting...");
+    forth_init();
+    mem_stat();
+    console_cmd.reserve(256);
+    LOGF("\nesp32forth8.4\n");
 }
-void loop(){
-  while(Serial.available()==0){};
-  outer();
+
+void loop(void) {
+    ///
+    /// while Web requests come in from handleInput asynchronously,
+    /// we also take user input from console (for debugging mostly)
+    ///
+    // for debugging: we can also take user input from Serial Monitor
+    static auto send_to_con = [](const char *rst) { LOG(rst); };
+    if (Serial.available()) {
+        console_cmd = Serial.readString();
+        LOG(console_cmd);
+        forth_outer(console_cmd.c_str(), send_to_con);
+        mem_stat();
+        delay(2);
+    }
 }
-/* End of ceforth_85.cpp */ 
