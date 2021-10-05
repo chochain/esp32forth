@@ -1,73 +1,55 @@
 /******************************************************************************/
-/* ceForth_36.cpp, Version 3.6 : Forth in C                                   */
-/******************************************************************************/
-/* 20sep21cht   version 3.5                                                   */
-/* Primitives/outer coded in C                                                */
-/* 01jul19cht   version 3.3                                                   */
-/* Macro assembler, Visual Studio 2019 Community                              */
-/* 13jul17cht   version 2.3                                                   */
-/* True byte code machine with bytecode                                       */
-/* Change w to WP, pointing to parameter field                                */
-/* 08jul17cht  version 2.2                                                    */
-/* Stacks are 256 cell circular buffers                                       */
-/* Clean up, delete SP@, SP!, RP@, RP!                                        */
-/* 13jun17cht  version 2.1                                                    */
-/* Compiled as a C++ console project in Visual Studio Community 2017          */
-/* Follow the eForth model with 64 primitives                                 */
-/* Kernel                                                                     */
-/* Use long long int to implement multipy and divide primitives               */
-/* Case insensitive interpreter                                               */
-/* data[] must be filled with rom_21.h eForth dictionary                      */
-/*   from c:/F#/ceforth_21                                                    */
-/* C compiler must be reminded that S and R are (char)                        */
+/* ESP32 ceForth, Version 8.5                                                 */
 /******************************************************************************/
 #include <sstream>      // iostream, stringstream
 #include <string>       // string class
 #include <iomanip>      // setw, setbase, ...
 using namespace std;
+typedef uint8_t    U8;
+typedef uint32_t   U32;
 
 #define FALSE      0
 #define TRUE       -1
 #define LOGICAL    ? -1 : 0
-#define LOWER(x,y) ((unsigned long)(x)<(unsigned long)(y))
-#define pop        top = stack[(unsigned char)S--]
-#define push       stack[(unsigned char)++S] = top; top =
-#define popR       rack[(unsigned char)R--]
-#define pushR      rack[(unsigned char)++R]
+#define pop        top = stack[(U8)S--]
+#define push       stack[(U8)++S] = top; top =
+#define popR       rack[(U8)R--]
+#define pushR      rack[(U8)++R]
 #define ALIGN(sz)  ((sz) + (-(sz) & 0x3))
-#define IMEDD      0x80
+#define IMMD_FLAG  0x80
 #define analogWrite(c,v,mx) ledcWrite((c),(8191/mx)*min((int)(v),mx))
 ///
 /// translate ESP32 String to/from Forth input/output streams (in C++ string)
 ///
-#define LOGF(s)     Serial.print(F(s))
-#define LOG(v)      Serial.print(v)
+#define LOGF(s)    Serial.print(F(s))
+#define LOG(v)     Serial.print(v)
 #define ENDL       endl; LOG(fout.str().c_str()); fout.str("")
 
-istringstream fin;      // ForthVM input stream
-ostringstream fout;     // ForthVM output stream
+istringstream fin;      /// ForthVM input stream
+ostringstream fout;     /// ForthVM output stream
 ///
 /// ForthVM global variables
 ///
+
 int rack[256] = { 0 };
 int stack[256] = { 0 };
-unsigned char R = 0, S = 0, bytecode, c;  // CC: bytecode should be U32, c is not used
-int* Pointer;                             // CC: Pointer is unused
-int  P, IP, WP, top, len;                 // CC: len can be local
-int  lfa, nfa, cfa, pfa;                  // CC: pfa is unused; lfa, cfa can be local
-int  DP, thread, context;                 // CC: DP, context and thread usage are inter-related
-int  ucase = 1, compile = 0, base = 16;
-string idiom, s;                          // CC: s is unused; idiom can be local
+int top;
+U8  R = 0, S = 0, bytecode;
+U32 P, IP, WP, nfa;
+U32 DP, thread, context;
+int ucase = 1, compile = 0, base = 16;
+string idiom;
 
-uint32_t iData[16000] = {};
-uint8_t* cData = (uint8_t*)iData;
+U32 iData[16000] = {};
+U8  *cData = (U8*)iData;
 
 void next()       { P = iData[IP >> 2]; WP = P; IP += 4; }
 void nest()       { pushR = IP; IP = WP + 4; next(); }
 void unnest()     { IP = popR; next(); }
 void comma(int n) { iData[DP >> 2] = n; DP += 4; }
 void comma_s(int lex, string s) {
-    comma(lex); len = s.length(); cData[DP++] = len;
+    comma(lex);
+    int len = cData[DP++] = s.length();
     for (int i = 0; i < len; i++) { cData[DP++] = s[i]; }
     while (DP & 3) { cData[DP++] = 0; }
 }
@@ -77,12 +59,12 @@ string next_idiom(char delim = 0) {
 void dot_r(int n, int v) {
     fout << setw(n) << setfill(' ') << v;
 }
-int find(string s) {            // CC: nfa, lfa, cfa, len modified
+int find(string s) {            // scan dictionary, return cfa found or 0
     int len_s = s.length();
     nfa = context;
     while (nfa) {
-        lfa = nfa - 4;                          // CC: 4 = sizeof(IU)
-        len = (int)cData[nfa] & 0x1f;           // CC: 0x1f = ~IMEDD
+        int len = (int)cData[nfa] & 0x1f;
+        int lfa = nfa - 4;
         if (len_s == len) {
             bool ok = true;
             const char *c = (const char*)&cData[nfa+1], *p = s.c_str();
@@ -91,7 +73,7 @@ int find(string s) {            // CC: nfa, lfa, cfa, len modified
                     ? ((*c & 0x5f) == (*p & 0x5f))
                     : (*c == *p);
             }
-            if (ok) return cfa = ALIGN(nfa + len + 1);
+            if (ok) return ALIGN(nfa + len + 1);
         }
         nfa = iData[lfa >> 2];
     }
@@ -101,8 +83,8 @@ void words() {
     int n = 0;
     nfa = context; // CONTEXT
     while (nfa) {
-        lfa = nfa - 4;
-        len = (int)cData[nfa] & 0x1f;
+        int len = (int)cData[nfa] & 0x1f;
+        int lfa = nfa - 4;
         for (int i = 0; i < len; i++)
             fout << cData[nfa + 1 + i];
         fout << ((++n % 10 == 0) ? '\n' : ' ');
@@ -127,7 +109,7 @@ void CheckSum() {                            // CC: P updated, but used as a loc
 }
 void dump() {// a n --                       // CC: P updated, but used as a local variable
     fout << ENDL;
-    len = top / 16; pop; P = top; pop;
+    int len = top / 16; pop; P = top; pop;
     for (int i = 0; i < len; i++) { CheckSum(); }
 }
 void ss_dump() {
@@ -143,20 +125,18 @@ struct Code{
     int    immd;
 } ;
 #define CODE(s, g)  { s, []{ g; }, 0 }
-#define IMMD(s, g)  { s, []{ g; }, IMEDD }
+#define IMMD(s, g)  { s, []{ g; }, IMMD_FLAG }
 static struct Code primitives[] = {
+    /// Execution control ops
     CODE("ret",   next()),
-    /// Stack ops
     CODE("nop",   {}),
     CODE("nest",  nest()),
     CODE("unnest",unnest()),
+    /// Stack ops
     CODE("dup",   stack[++S] = top),
     CODE("drop",  pop),
     CODE("over",  push stack[(S - 1)]),
-    CODE("swap",
-         int n = top;
-         top = stack[S];
-         stack[S] = n),
+    CODE("swap",  int n = top; top = stack[S]; stack[S] = n),
     CODE("rot",
          int n = stack[(S - 1)];
          stack[(S - 1)] = stack[S];
@@ -224,10 +204,10 @@ static struct Code primitives[] = {
     CODE("spaces",int n = top; pop; for (int i = 0; i < n; i++) fout << " "),
     /// Literal ops
     CODE("dostr",
-         int p = IP; push p; len = cData[p];
+         int p = IP; push p; int len = cData[p];
          p += (len + 1); p += (-p & 3); IP = p),
     CODE("dotstr",
-         int p = IP; len = cData[p++];
+         int p = IP; int len = cData[p++];
          for (int i = 0; i < len; i++) fout << cData[p++];
          p += (-p & 3); IP = p),
     CODE("dolit", push iData[IP >> 2]; IP += 4),
@@ -237,12 +217,8 @@ static struct Code primitives[] = {
     IMMD("(",     next_idiom(')')),
     IMMD(".(",    fout << next_idiom(')')),
     IMMD("\\",    next_idiom('\n')),
-    IMMD("$*",
-         int n = find("dostr");
-         comma_s(n, next_idiom('"'))),
-    IMMD(".\"",
-         int n = find("dotstr");
-         comma_s(n, next_idiom('"'))),
+    IMMD("$*",    comma_s(find("dostr"), next_idiom('"'))),
+    IMMD(".\"",   comma_s(find("dotstr"), next_idiom('"'))),
     /// Branching ops
     CODE("branch", IP = iData[IP >> 2]; next()),
     CODE("0branch",
@@ -254,52 +230,40 @@ static struct Code primitives[] = {
          }
          else { IP += 4;  R--; }
          next()),
-    IMMD("if",
-         comma(find("0branch")); push DP;
-         comma(0)),
+    IMMD("if",    comma(find("0branch")); push DP; comma(0)),
     IMMD("else",
          comma(find("branch")); iData[top >> 2] = DP + 4;
          top = DP; comma(0)),
     IMMD("then", iData[top >> 2] = DP; pop),
     /// Loops
     IMMD("begin",  push DP),
-    IMMD("while",
-         comma(find("0branch")); push DP;
-         comma(0)),
+    IMMD("while", comma(find("0branch")); push DP; comma(0)),
     IMMD("repeat",
          comma(find("branch")); int n = top; pop;
          comma(top); pop; iData[n >> 2] = DP),
-    IMMD("again",
-         comma(find("branch"));
-         comma(top); pop),
-    IMMD("until",
-         comma(find("0branch"));
-         comma(top); pop),
+    IMMD("again", comma(find("branch")); comma(top); pop),
+    IMMD("until", comma(find("0branch")); comma(top); pop),
     ///  For loops
     IMMD("for", comma((find(">r"))); push DP),
     IMMD("aft",
          pop;
          comma((find("branch"))); comma(0); push DP; push DP - 4),
-    IMMD("next",
-         comma(find("donext")); comma(top); pop),
+    IMMD("next",  comma(find("donext")); comma(top); pop),
     ///  Compiler ops
     CODE("exit",  IP = popR; next()),
     CODE("docon", push iData[(WP + 4) >> 2]),
     CODE(":",
-         string s = next_idiom();
-         thread = DP + 4; comma_s(context, s);
+         thread = DP + 4; comma_s(context, next_idiom());
          comma(cData[find("nest")]); compile = 1),
     IMMD(";",
          context = thread; compile = 0;
          comma(find("unnest"))),
     CODE("variable",
-         string s = next_idiom();
-         thread = DP + 4; comma_s(context, s);
+         thread = DP + 4; comma_s(context, next_idiom());
          context = thread;
          comma(cData[find("dovar")]); comma(0)),
     CODE("constant",
-         string s = next_idiom();
-         thread = DP + 4; comma_s(context, s);
+         thread = DP + 4; comma_s(context, next_idiom());
          context = thread;
          comma(cData[find("docon")]); comma(top); pop),
     CODE("@",  top = iData[top >> 2]),
@@ -312,17 +276,16 @@ static struct Code primitives[] = {
     CODE(",",  comma(top); pop),
     /// metacompiler
     CODE("create",
-         string s = next_idiom();
-         thread = DP + 4; comma_s(context, s);
+         thread = DP + 4; comma_s(context, next_idiom());
          context = thread;
          comma(find("nest")); comma(find("dovar"))),
     CODE("does", comma(find("nest"))), // copy words after "does" to new the word
     CODE("to",                         // n -- , compile only
          int n = find(next_idiom());
-         iData[(cfa + 4) >> 2] = top; pop),
+         iData[(n + 4) >> 2] = top; pop),
     CODE("is",                         // w -- , execute only
          int n = find(next_idiom());
-         iData[cfa >> 2] = top; pop),
+         iData[n >> 2] = top; pop),
     CODE("[to]",
          int n = iData[IP >> 2]; iData[(n + 4) >> 2] = top; pop),
     /// Debug ops
@@ -343,7 +306,7 @@ static struct Code primitives[] = {
 void encode(struct Code* prim) {
     string seq = prim->name;
     int immd = prim->immd;
-    len = seq.length();
+    int len  = seq.length();
     comma(thread);                   /// lfa: link field (U32)
     thread = DP;
     cData[DP++] = len | immd;        /// nfa: word length + immediate bit
@@ -365,8 +328,9 @@ void forth_outer(const char *cmd) {
     fout.str("");                   /// clean output buffer, ready for next run
     fout << setbase(base);
     while (fin >> idiom) {
-        if (find(idiom)) {
-            if (compile && ((cData[nfa] & IMEDD) == 0))
+        int cfa = find(idiom);
+        if (cfa) {
+            if (compile && ((cData[nfa] & IMMD_FLAG) == 0))
                 comma(cfa);
             else run(cfa);
         }
@@ -400,7 +364,7 @@ void forth_init() {
     // dump dictionary
     fout << "\nDump dictionary\n" << setbase(16);
     P = 0;
-    for (len = 0; len < 100; len++) { CheckSum(); }
+    for (int len = 0; len < 100; len++) { CheckSum(); }
     // Boot Up
     P = 0; WP = 0; IP = 0; S = 0; R = 0;
     top = -1;
