@@ -4,6 +4,8 @@
 #include <sstream>      // iostream, stringstream
 #include <string>       // string class
 #include <iomanip>      // setw, setbase, ...
+#include "SPIFFS.h"     // flash memory
+#include <WebServer.h>
 using namespace std;
 typedef uint8_t    U8;
 typedef uint32_t   U32;
@@ -23,7 +25,7 @@ typedef uint32_t   U32;
 ///
 #define LOGF(s)    Serial.print(F(s))
 #define LOG(v)     Serial.print(v)
-#define ENDL       endl; LOG(fout.str().c_str()); fout.str("")
+#define ENDL       endl; yield()
 
 istringstream fin;      /// ForthVM input stream
 ostringstream fout;     /// ForthVM output stream
@@ -92,25 +94,25 @@ void words() {
     }
     fout << ENDL;
 }
-void CheckSum() {                            // CC: P updated, but used as a local variable
-    pushR = P; char sum = 0;
-    fout << setw(4) << setbase(16) << P << ": ";
-    for (int i = 0; i < 16; i++) {
-        sum += cData[P];
-        fout << setw(2) << (int)cData[P++] << ' ';
+void dump(int a, int n) {
+    fout << setbase(16) << ENDL;
+    for (int r = 0, sz = ((n+15)/16); r < sz; r++) {
+        int p0 = a + r * 16, p = p0;
+        char sum = 0;
+        fout <<setw(4) << p << ": ";
+        for (int i = 0; i < 16; i++) {
+            sum += cData[p];
+            fout <<setw(2) << (int)cData[p++] << ' ';
+        }
+        fout << setw(4) << (sum & 0xff) << "  ";
+        p = p0;
+        for (int i = 0; i < 16; i++) {
+            sum = cData[p++] & 0x7f;
+            fout <<(char)((sum < 0x20) ? '_' : sum);
+        }
+        fout << ENDL;
     }
-    fout << setw(4) << (sum & 0XFF) << "  ";
-    P = popR;
-    for (int i = 0; i < 16; i++) {
-        sum = cData[P++] & 0x7f;
-        fout << (char)((sum < 0x20) ? '_' : sum);
-    }
-    fout << ENDL;
-}
-void dump() {// a n --                       // CC: P updated, but used as a local variable
-    fout << ENDL;
-    int len = top / 16; pop; P = top; pop;
-    for (int i = 0; i < len; i++) { CheckSum(); }
+    fout << setbase(base) << ENDL;
 }
 void ss_dump() {
     fout << "< "; for (int i = S - 4; i < S + 1; i++) { fout << stack[i] << " "; }
@@ -203,13 +205,11 @@ static struct Code primitives[] = {
     CODE("space", fout << " "),
     CODE("spaces",int n = top; pop; for (int i = 0; i < n; i++) fout << " "),
     /// Literal ops
-    CODE("dostr",
-         int p = IP; push p; int len = cData[p];
-         p += (len + 1); p += (-p & 3); IP = p),
-    CODE("dotstr",
-         int p = IP; int len = cData[p++];
-         for (int i = 0; i < len; i++) fout << cData[p++];
-         p += (-p & 3); IP = p),
+    CODE("dostr", push IP; IP = ALIGN(IP + cData[IP] + 1)),
+    CODE("dotstr", 
+         int len = cData[IP++];
+         for (int i = 0; i < len; i++) fout << cData[IP++];
+         IP = ALIGN(IP)),
     CODE("dolit", push iData[IP >> 2]; IP += 4),
     CODE("dovar", push WP + 4),
     IMMD("[",     compile = 0),
@@ -292,7 +292,7 @@ static struct Code primitives[] = {
     CODE("bye",   exit(0)),
     CODE("here",  push DP),
     CODE("words", words()),
-    CODE("dump",  dump()),
+    CODE("dump",  int n = top; pop; int a = top; pop; dump(a, n)),
     CODE("'" ,    push find(next_idiom())),
     CODE("see",
          int n = find(next_idiom());
@@ -303,7 +303,7 @@ static struct Code primitives[] = {
     CODE("boot",  DP = find("boot") + 4; thread = nfa)
 };
 // Macro Assembler
-void encode(struct Code* prim) {
+void encode(struct Code* prim) {     /// DP, thread, and P updated
     string seq = prim->name;
     int immd = prim->immd;
     int len  = seq.length();
@@ -322,9 +322,9 @@ void run(int n) { /// inner interpreter, P, WP, IP, R, bytecode modified
         primitives[bytecode].xt();  /// execute colon
     } while (R != 0);
 }
-void forth_outer(const char *cmd) {
+String forth_outer(String cmd) {
     fin.clear();                    /// clear input stream error bit if any
-    fin.str(cmd);                   /// feed user command into input stream
+    fin.str(cmd.c_str());           /// feed user command into input stream
     fout.str("");                   /// clean output buffer, ready for next run
     fout << setbase(base);
     while (fin >> idiom) {
@@ -349,24 +349,22 @@ void forth_outer(const char *cmd) {
         }
     }
     if (!compile) ss_dump();      /// dump stack and display ok prompt
+    return String(fout.str().c_str());
 }
 ///==========================================================================
 /// ForthVM front-end handlers
 ///==========================================================================
 void forth_init() {
-    cData = (unsigned char*)iData;
-    IP = 0; thread = 0; P = 0;
-    S = 0; R = 0;
+    DP = thread = P = 0; S = R = 0;
     fout << "Build dictionary" << setbase(16) << ENDL;
     for (int i = 0; i < sizeof(primitives) / sizeof(Code); i++) encode(&primitives[i]);
     context = DP - 12;
     fout << "\nPointers DP=" << DP << " Link=" << context << " Words=" << P << ENDL;
-    // dump dictionary
-    fout << "\nDump dictionary\n" << setbase(16);
-    P = 0;
-    for (int len = 0; len < 100; len++) { CheckSum(); }
+
+    dump(0, DP);                /// dump dictionary
+
     // Boot Up
-    P = 0; WP = 0; IP = 0; S = 0; R = 0;
+    P = WP = IP = 0;
     top = -1;
     fout << "\nesp32forth_85\n" << setbase(16);
     words();
@@ -419,7 +417,7 @@ void loop(void) {
     if (Serial.available()) {
         console_cmd = Serial.readString();
         LOG(console_cmd);
-        forth_outer(console_cmd.c_str());
+        LOG(forth_outer(console_cmd));
         mem_stat();
         delay(2);
     }
