@@ -10,21 +10,24 @@ using namespace std;
 typedef uint8_t    U8;
 typedef uint32_t   U32;
 
+#define IMMD_FLAG  0x80
 #define FALSE      0
 #define TRUE       -1
-#define LOGICAL    ? -1 : 0
+#define LOGICAL    ? TRUE : FALSE
 #define pop        top = stack[(U8)S--]
 #define push       stack[(U8)++S] = top; top =
 #define popR       rack[(U8)R--]
 #define pushR      rack[(U8)++R]
 #define ALIGN(sz)  ((sz) + (-(sz) & 0x3))
-#define IMMD_FLAG  0x80
 #define analogWrite(c,v,mx) ledcWrite((c),(8191/mx)*min((int)(v),mx))
+#define PEEK(a)    (U32)(*(U32*)((uintptr_t)(a)))
+#define POKE(a, c) (*(U32*)((uintptr_t)(a))=(U32)(c))
 ///
 /// translate ESP32 String to/from Forth input/output streams (in C++ string)
 ///
 #define LOGF(s)    Serial.print(F(s))
 #define LOG(v)     Serial.print(v)
+#define LOGH(v)    Serial.print(v, HEX)
 #define ENDL       endl; yield()
 
 istringstream fin;      /// ForthVM input stream
@@ -32,17 +35,16 @@ ostringstream fout;     /// ForthVM output stream
 ///
 /// ForthVM global variables
 ///
-
 int rack[256] = { 0 };
 int stack[256] = { 0 };
 int top;
 U8  R = 0, S = 0, bytecode;
 U32 P, IP, WP, nfa;
-U32 DP, thread, context;
+U32 DP, thread, context;           // here, privious nfa, current nfa
 int ucase = 1, compile = 0, base = 16;
 string idiom;
 
-U32 iData[16000] = {};
+U32 iData[16000] = {};             // 64K
 U8  *cData = (U8*)iData;
 
 void next()       { P = iData[IP >> 2]; WP = P; IP += 4; }
@@ -66,7 +68,6 @@ int find(string s) {            // scan dictionary, return cfa found or 0
     nfa = context;
     while (nfa) {
         int len = (int)cData[nfa] & 0x1f;
-        int lfa = nfa - 4;
         if (len_s == len) {
             bool ok = true;
             const char *c = (const char*)&cData[nfa+1], *p = s.c_str();
@@ -75,22 +76,27 @@ int find(string s) {            // scan dictionary, return cfa found or 0
                     ? ((*c & 0x5f) == (*p & 0x5f))
                     : (*c == *p);
             }
-            if (ok) return ALIGN(nfa + len + 1);
+            if (ok) {
+                yield();
+                return ALIGN(nfa + len + 1);
+            }
         }
-        nfa = iData[lfa >> 2];
+        nfa = iData[(nfa - 4) >> 2];   // link field to previous word
     }
+    yield();
     return 0;
 }
 void words() {
     int n = 0;
-    nfa = context; // CONTEXT
+    nfa = context;                     // CONTEXT
+    fout << ENDL;
     while (nfa) {
         int len = (int)cData[nfa] & 0x1f;
-        int lfa = nfa - 4;
         for (int i = 0; i < len; i++)
             fout << cData[nfa + 1 + i];
-        fout << ((++n % 10 == 0) ? '\n' : ' ');
-        nfa = iData[lfa >> 2];
+        if ((++n % 10) == 0) { fout << ENDL; }
+        else                 { fout << ' ';  }
+        nfa = iData[(nfa - 4) >> 2];   // link field to previous word
     }
     fout << ENDL;
 }
@@ -115,7 +121,7 @@ void dump(int a, int n) {
     fout << setbase(base) << ENDL;
 }
 void ss_dump() {
-    fout << "< "; for (int i = S - 4; i < S + 1; i++) { fout << stack[i] << " "; }
+    fout << "< "; for (int i = 0; i < 5; i++) fout << stack[(U8)(S - 4 + i)] << " ";
     fout << top << " >ok" << ENDL;
 }
 ///
@@ -300,7 +306,19 @@ static struct Code primitives[] = {
          fout << ENDL),
     CODE("ucase", ucase = top; pop),
     CODE("clock", push millis()),
-    CODE("boot",  DP = find("boot") + 4; thread = nfa)
+    CODE("peek",  int a = top; pop; push PEEK(a)),
+    CODE("poke",  int a = top; pop; POKE(a, top); pop),
+    CODE("delay", delay(top); pop),
+    /// Arduino specific ops
+    CODE("pin",   int p = top; pop; pinMode(p, top); pop),
+    CODE("in",    int p = top; pop; push digitalRead(p)),
+    CODE("out",   int p = top; pop; digitalWrite(p, top); pop),
+    CODE("adc",   int p = top; pop; push analogRead(p)),
+    CODE("duty",  int p = top; pop; analogWrite(p, top, 255); pop),
+    CODE("attach",int p = top; pop; ledcAttachPin(p, top); pop),
+    CODE("setup", int ch = top; pop; int freq=top; pop; ledcSetup(ch, freq, top); pop),
+    CODE("tone",  int ch = top; pop; ledcWriteTone(ch, top); pop),
+    CODE("boot",  DP = find("boot") + 4; context = nfa)
 };
 // Macro Assembler
 void encode(struct Code* prim) {     /// DP, thread, and P updated
@@ -313,20 +331,30 @@ void encode(struct Code* prim) {     /// DP, thread, and P updated
     for (int i = 0; i < len; i++) { cData[DP++] = seq[i]; }
     while (DP & 3) { cData[DP++] = 0; }
     comma(P++);                      /// cfa: sequential bytecode (U32 now)
-    fout << P - 1 << ':' << DP - 4 << ' ' << seq << ' ';
 }
 void run(int n) { /// inner interpreter, P, WP, IP, R, bytecode modified
     P = n; WP = n; IP = 0; R = 0;
     do {
-        bytecode = cData[P++];
-        primitives[bytecode].xt();  /// execute colon
+        bytecode = cData[P++];       /// fetch bytecode
+        primitives[bytecode].xt();   /// execute colon byte-by-byte
     } while (R != 0);
 }
-String forth_outer(String cmd) {
-    fin.clear();                    /// clear input stream error bit if any
-    fin.str(cmd.c_str());           /// feed user command into input stream
-    fout.str("");                   /// clean output buffer, ready for next run
+void forth_init() {
+    DP = thread = P = 0; S = R = 0;
+    for (int i = 0; i < sizeof(primitives) / sizeof(Code); i++) {
+        encode(&primitives[i]);
+    }
+    context = DP - 12;               /// lfa: 12 = ALIGN("boot"+1)+sizeof(U32)
+    LOG("\nDP=");     LOGH(DP);
+    LOG(" link=");    LOGH(context);
+    LOG(" Words=");   LOGH(P);
+    LOG("\n");
+    // Boot Up
+    P = WP = IP = 0;
+    top = -1;
     fout << setbase(base);
+}
+void forth_outer() {
     while (fin >> idiom) {
         int cfa = find(idiom);
         if (cfa) {
@@ -349,25 +377,103 @@ String forth_outer(String cmd) {
         }
     }
     if (!compile) ss_dump();      /// dump stack and display ok prompt
-    return String(fout.str().c_str());
 }
+///==========================================================================
+/// ESP32 Web Serer connection and index page
+///==========================================================================
+//const char *ssid = "Sonic-6af4";
+//const char *pass = "7b369c932f";
+const char *ssid = "Frontier7008";
+const char *pass = "8551666595";
+
+WebServer server(80);
+
+/******************************************************************************/
+/* ledc                                                                       */
+/******************************************************************************/
+/* LEDC Software Fade */
+// use first channel of 16 channels (started from zero)
+#define LEDC_CHANNEL_0     0
+// use 13 bit precission for LEDC timer
+#define LEDC_TIMER_13_BIT  13
+// use 5000 Hz as a LEDC base frequency
+#define LEDC_BASE_FREQ     5000
+// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
+#define LED_PIN            5
+#define BRIGHTNESS         255    // how bright the LED is
+
+static const char *index_html PROGMEM = R"XX(
+<html><head><meta charset='UTF-8'><title>esp32forth</title>
+<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
+</head>
+<body>
+    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
+         background-color:#f8f0f0;'>esp32Forth v8</div>
+    <textarea id='tib' style='height:600px;width:400px;'
+        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
+</body>
+<script>
+let log = document.getElementById('log')
+let tib = document.getElementById('tib')
+function httpPost(url, items, callback) {
+    let fd = new FormData()
+    for (k in items) { fd.append(k, items[k]) }
+    let r = new XMLHttpRequest()
+    r.onreadystatechange = function() {
+        if (this.readyState != XMLHttpRequest.DONE) return
+        callback(this.status===200 ? this.responseText : null) }
+    r.open('POST', url)
+    r.send(fd) }
+function chunk(ary, d) {                        // recursive call to sequence POSTs
+    req = ary.slice(0,30).join('\n')            // 30*(average 50 byte/line) ~= 1.5K
+    if (req=='' || d>20) return                 // bail looping, just in case
+    log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
+    httpPost('/input', { cmd: req }, rsp=>{
+        if (rsp !== null) {
+            log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
+            log.scrollTop=log.scrollHeight      // scroll down
+            chunk(ary.splice(30), d+1) }})}     // next 30 lines
+function forth() {
+    let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
+    let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
+    chunk(cmd.split('\n'), 1); tib.value = '' }
+window.onload = ()=>{ tib.focus() }
+</script></html>
+)XX";
 ///==========================================================================
 /// ForthVM front-end handlers
 ///==========================================================================
-void forth_init() {
-    DP = thread = P = 0; S = R = 0;
-    fout << "Build dictionary" << setbase(16) << ENDL;
-    for (int i = 0; i < sizeof(primitives) / sizeof(Code); i++) encode(&primitives[i]);
-    context = DP - 12;
-    fout << "\nPointers DP=" << DP << " Link=" << context << " Words=" << P << ENDL;
-
-    dump(0, DP);                /// dump dictionary
-
-    // Boot Up
-    P = WP = IP = 0;
-    top = -1;
-    fout << "\nesp32forth_85\n" << setbase(16);
-    words();
+///
+/// translate ESP32 String to/from Forth input/output streams (in C++ string)
+///
+static String process_command(String cmd) {
+    fout.str("");                       // clean output buffer, ready for next run
+    fin.clear();                        // clear input stream error bit if any
+    fin.str(cmd.c_str());               // feed user command into input stream
+    forth_outer();                      // invoke outer interpreter
+    return String(fout.str().c_str());  // return response as a String object
+}
+///
+/// Forth bootstrap loader (from Flash)
+///
+static int forth_load(const char *fname) {
+    if (!SPIFFS.begin()) {
+        LOG("Error mounting SPIFFS\n"); return 1; }
+    File file = SPIFFS.open(fname, "r");
+    if (!file) {
+        LOG("Error opening file:"); LOG(fname); return 1; }
+    LOG("Loading file: /data"); LOG(fname); LOG("...\n");
+    while (file.available()) {
+        // retrieve command from Flash memory
+        String cmd = file.readStringUntil('\n');
+        LOG("<< "+cmd+"\n");  // display bootstrap command on console
+        // send it to Forth command processor
+        process_command(cmd);
+    }
+    LOG("Done loading.\n");
+    file.close();
+    SPIFFS.end();
+    return 0;
 }
 ///
 /// memory statistics dump - for heap and stack debugging
@@ -386,13 +492,32 @@ static void mem_stat() {
     }
 }
 ///==========================================================================
+/// Web Server handlers
+///==========================================================================
+static void handleInput() {
+    // receive POST from web browser
+    if (!server.hasArg("cmd")) { // make sure parameter contains "cmd" property
+        server.send(500, "text/plain", "Missing Input\r\n");
+        return;
+    }
+    // retrieve command from web server
+    String cmd = server.arg("cmd");
+    LOG("\n>> "+cmd+"\n");       // display requrest on console
+    // send requrest command to Forth command processor, and receive response
+    String rsp = process_command(cmd);
+    LOG(rsp);                    // display response on console
+    mem_stat();
+    // send response back to web browser
+    server.setContentLength(rsp.length());
+    server.send(200, "text/plain; charset=utf-8", rsp);
+}
+///==========================================================================
 /// ESP32 routines
 ///==========================================================================
 String console_cmd;          /// ESP32 input buffer
 void setup() {
     Serial.begin(115200);
     delay(100);
-
     ledcSetup(0, 100, 13);
     ledcAttachPin(5, 0);
     analogWrite(0, 250, 255);
@@ -407,17 +532,38 @@ void setup() {
     pinMode(19,OUTPUT);
     digitalWrite(19, LOW);   // motor2 bacward
     analogWrite(0, 0, 255);
-
-    forth_init();
-    mem_stat();
+    //  WiFi.config(ip, gateway, subnet);
+    WiFi.mode(WIFI_STA);
+    // attempt to connect to Wifi network:
+    WiFi.begin(ssid, pass);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        LOG("."); }
+    LOG("WiFi connected, IP Address: ");
+    LOG(WiFi.localIP());
+    server.begin();
+    // Setup web server handlers
+    server.on("/", HTTP_GET, []() {
+        server.send(200, "text/html", index_html); });
+    server.on("/input", HTTP_POST, handleInput);
+    LOG("\nHTTP server started\n");
+    ///
+    /// ForthVM initalization
+    ///
     console_cmd.reserve(16000);
     idiom.reserve(256);
+    forth_init();
+    forth_load("/load.txt");
+    mem_stat();
+    LOG("\nesp32Forth v8.5\n");
 }
 void loop(void) {
+    server.handleClient(); // ESP32 handle web requests
+    delay(2);              // yield to background tasks (interrupt, timer,...)
     if (Serial.available()) {
         console_cmd = Serial.readString();
         LOG(console_cmd);
-        LOG(forth_outer(console_cmd));
+        LOG(process_command(console_cmd));
         mem_stat();
         delay(2);
     }
