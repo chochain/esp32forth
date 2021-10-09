@@ -6,7 +6,6 @@
 #include <string.h>     // strcmp
 #include <exception>    // try...catch, throw (disable for less capable MCU)
 #include "SPIFFS.h"     // flash memory
-#include <WebServer.h>
 ///
 /// logical units (instead of physical) for type check and portability
 ///
@@ -69,8 +68,7 @@ struct Code {
         struct {            /// a colon word
             U16 def:  1;    /// colon defined word
             U16 immd: 1;    /// immediate flag
-            U16 len:  14;   /// len of pf
-            U16 xxx;    
+            U16 len:  14;   /// len of pf (16K max)
             IU  pfa;        /// offset to pmem space (16-bit for 64K range)
         };
     };
@@ -157,8 +155,8 @@ void colon(const char *name) {
     int sz = STRLEN(name);                  // string length, aligned
     pmem.push((U8*)name,  sz);              // setup raw name field
     Code c(nfa, [](int){});                 // create a new word on dictionary
-    c.def = 1;                              // specify a colon word
-    c.len = 0;                              // advance counter (by number of U16)
+    c.def  = 1;                             // specify a colon word
+    c.len  = 0;                             // advance counter (by number of U16)
     c.pfa = HERE;                           // capture code field index
     dict.push(c);                           // deep copy Code struct into dictionary
 };
@@ -174,6 +172,7 @@ void nest(IU c) {
     /// handles a colon word
     rs.push((DU)(IP - IP0)); rs.push(WP);   /// * setup call frame
     IP0 = IP = PFA(WP=c);                   // CC: this takes 30ms/1K, need work
+    // i.e. IP = ((U8*)&pmem[dict[c].pfa])
     IU n = dict[c].len;                     // CC: this saved 300ms/1M
     try {                                   // CC: is dict[c] kept in cache?
         while ((IU)(IP - IP0) < n) {        /// * recursively call all children
@@ -201,12 +200,12 @@ using namespace std;    // default to C++ standard template library
 istringstream   fin;    // forth_in
 ostringstream   fout;   // forth_out
 string strbuf;          // input string buffer
-void (*fout_cb)(const char*);  // forth output callback function
+void (*fout_cb)(int, const char*);  // forth output callback function
 ///
 /// Arduino specific macros
 ///
 #define analogWrite(c,v,mx) ledcWrite((c),(8191/mx)*min((int)(v),mx))
-#define ENDL                endl
+#define ENDL                endl; fout_cb(fout.str().length(), fout.str().c_str()); fout.str("")
 ///================================================================================
 /// debug functions
 ///                   
@@ -522,7 +521,7 @@ void forth_init() {
 ///
 /// outer interpreter
 ///
-void forth_outer(const char *cmd, void(*callback)(const char*)) {
+void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
     fin.clear();                             /// clear input stream error bit if any
     fin.str(cmd);                            /// feed user command into input stream
     fout_cb = callback;                      /// setup callback function
@@ -559,66 +558,6 @@ void forth_outer(const char *cmd, void(*callback)(const char*)) {
     if (!compile) ss_dump();
 }
 ///==========================================================================
-/// ESP32 Web Serer connection and index page
-///==========================================================================
-const char *ssid = "Sonic-6af4";
-const char *pass = "7b369c932f";
-
-WebServer server(80);
-
-/******************************************************************************/
-/* ledc                                                                       */
-/******************************************************************************/
-/* LEDC Software Fade */
-// use first channel of 16 channels (started from zero)
-#define LEDC_CHANNEL_0     0
-// use 13 bit precission for LEDC timer
-#define LEDC_TIMER_13_BIT  13
-// use 5000 Hz as a LEDC base frequency
-#define LEDC_BASE_FREQ     5000
-// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
-#define LED_PIN            5
-#define BRIGHTNESS         255    // how bright the LED is
-
-static const char *index_html PROGMEM = R"XX(
-<html><head><meta charset='UTF-8'><title>esp32forth</title>
-<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
-</head>
-<body>
-    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
-         background-color:#f8f0f0;'>ESP32Forth v8</div>
-    <textarea id='tib' style='height:600px;width:400px;'
-        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
-</body>
-<script>
-let log = document.getElementById('log')
-let tib = document.getElementById('tib')
-function httpPost(url, items, callback) {
-    let fd = new FormData()
-    for (k in items) { fd.append(k, items[k]) }
-    let r = new XMLHttpRequest()
-    r.onreadystatechange = function() {
-        if (this.readyState != XMLHttpRequest.DONE) return
-        callback(this.status===200 ? this.responseText : null) }
-    r.open('POST', url)
-    r.send(fd) }
-function chunk(ary, d) {                        // recursive call to sequence POSTs
-    req = ary.slice(0,30).join('\n')            // 30*(average 50 byte/line) ~= 1.5K
-    if (req=='' || d>20) return                 // bail looping, just in case
-    log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
-    httpPost('/input', { cmd: req }, rsp=>{
-        if (rsp !== null) {
-            log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
-            log.scrollTop=log.scrollHeight      // scroll down
-            chunk(ary.splice(30), d+1) }})}     // next 30 lines
-function forth() {
-    let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
-    let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
-    chunk(cmd.split('\n'), 1); tib.value = '' }
-window.onload = ()=>{ tib.focus() }
-</script></html>
-)XX";
-///==========================================================================
 /// ForthVM front-end handlers
 ///==========================================================================
 ///
@@ -626,28 +565,6 @@ window.onload = ()=>{ tib.focus() }
 ///
 #define LOGF(s)  Serial.print(F(s))
 #define LOG(v)   Serial.print(v)
-///
-/// Forth bootstrap loader (from Flash)
-///
-static int forth_load(const char *fname) {
-    auto dummy = [](const char *) { /* do nothing */ };
-    if (!SPIFFS.begin()) {
-        LOGF("Error mounting SPIFFS"); return 1; }
-    File file = SPIFFS.open(fname, "r");
-    if (!file) {
-        LOGF("Error opening file:"); LOG(fname); return 1; }
-    LOGF("Loading file: "); LOG(fname); LOGF("...");
-    while (file.available()) {
-        char cmd[256], *p = cmd, c;
-        while ((c = file.read())!='\n') *p++ = c;   // one line a time
-        *p = '\0';
-        LOGF("\n<< "); LOG(cmd);                    // show bootstrap command
-        forth_outer(cmd, dummy); }
-    LOGF("Done loading.\n");
-    file.close();
-    SPIFFS.end();
-    return 0;
-}
 ///
 /// memory statistics dump - for heap and stack debugging
 ///
@@ -666,38 +583,189 @@ static void mem_stat() {
         abort();                 // bail, on any memory error
     }
 }
-///==========================================================================
-/// Web Server handlers
-///==========================================================================
-static void handleInput() {
-    // receive POST from web browser
-    if (!server.hasArg("cmd")) {  // make sure parameter contains "cmd" property
-        server.send(500, "text/plain", "Missing Input\r\n");
-        return;
-    }
-    // retrieve command from web server
-    String cmd = server.arg("cmd");
-    Serial.print("\n>> "+cmd);          // display requrest on console
-    // send requrest command to Forth command processor, and receive response
-    String rsp = process_command(cmd);
-    Serial.print(rsp);                  // display response on console
-    mem_stat();
-    // send response back to web browser
-    server.setContentLength(rsp.length());
-    server.send(200, "text/plain; charset=utf-8", rsp);
+///
+/// Forth bootstrap loader (from Flash)
+///
+static int forth_load(const char *fname) {
+    auto dummy = [](int, const char *) { /* do nothing */ };
+    if (!SPIFFS.begin()) {
+        LOGF("Error mounting SPIFFS"); return 1; }
+    File file = SPIFFS.open(fname, "r");
+    if (!file) {
+        LOGF("Error opening file:"); LOG(fname); return 1; }
+    LOGF("Loading file: "); LOG(fname); LOGF("...");
+    while (file.available()) {
+        char cmd[256], *p = cmd, c;
+        while ((c = file.read())!='\n') *p++ = c;   // one line a time
+        *p = '\0';
+        LOGF("\n<< "); LOG(cmd);                    // show bootstrap command
+        forth_outer(cmd, dummy); }
+    LOGF("Done loading.\n");
+    file.close();
+    SPIFFS.end();
+    return 0;
 }
+
+void forth_setup() {
+    ///
+    /// ForthVM initalization
+    ///
+    LOGF("Booting esp32forth v8.4 ...");
+    forth_init();
+//    forth_load("/load.txt");    // compile /data/load.txt
+
+    mem_stat();
+    LOGF("\nesp32forth8.4");
+}
+///==========================================================================
+/// ESP32 Web Serer connection and index page
+///==========================================================================
+#include <WiFi.h>
+
+//const char *WIFI_SSID = "Sonic-6af4";
+//const char *WIFI_PASS = "7b369c932f";
+const char *WIFI_SSID = "Frontier7008";
+const char *WIFI_PASS = "8551666595";
+
+static const char *HTML_INDEX PROGMEM = R"XX(
+HTTP/1.1 200 OK
+Content-type:text/html
+
+<html><head><meta charset='UTF-8'><title>esp32forth</title>
+<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
+</head>
+<body>
+    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
+         background-color:#f8f0f0;'>ESP32Forth v8</div>
+    <textarea id='tib' style='height:600px;width:400px;'
+        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
+</body>
+<script>
+let log = document.getElementById('log')
+let tib = document.getElementById('tib')
+let idx = 0
+async function send_post(url, id, req) {
+    let cmd = '\n---CMD'+id+'\n'
+    const rsp = await fetch(url, {
+        method: 'POST', headers: { 'Context-Type': 'text/plain' },
+        body: cmd+req+cmd
+    })
+    return rsp.text()
+}
+async function forth() {
+    let ary = tib.value.split('\n')
+    for (let i=0; i<ary.length; i+=6) {
+        let id = '_'+(idx++).toString();
+        log.innerHTML += '<div id='+id+'></div>'
+        send_post('/input', id, ary.slice(i, i+6).join('\n'))
+        .then(txt=>{
+            console.log(txt)
+            document.getElementById(id).innerHTML +=
+                txt.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
+            log.scrollTop=log.scrollHeight
+        })
+        await new Promise(r => setTimeout(r, 200))
+    }
+    tib.value = ''
+}
+window.onload = ()=>{ tib.focus() }
+</script></html>
+
+)XX";
+
+static const char *HTML_CHUNKED PROGMEM = R"XX(
+HTTP/1.1 200 OK
+Content-type:text/plain
+Transfer-Encoding: chunked
+
+)XX";
+
+namespace ForthServer {
+    WiFiServer server;
+    WiFiClient client;
+    String req;
+    int readline() {
+        req.clear();
+        while (client.connected()) {
+            if (client.available()) {
+                char c = client.read();
+                Serial.print(c);
+                if (c == '\n') return 1;
+                if (c != '\r') req += c;
+            }
+        }
+        return 0;
+    }
+    void handle_index() {
+        client.println(HTML_INDEX);
+        delay(30);                   // give browser sometime to receive
+    }
+    void send_chunk(int len, const char *msg) {
+        Serial.print("<"); Serial.print(len); Serial.print(">");
+        Serial.print(msg);
+        client.println(len, HEX);
+        client.println(msg);
+        yield();
+    }
+    void handle_input() {
+        // skip header
+        while (readline() && req.length()>0) {
+            Serial.print("--"); Serial.print(req);
+        }
+        // find Forth commmand header
+        for (int i=0; i<4 && readline(); i++) {
+            if (req.startsWith("---CMD")) break;
+        }
+        // process Forth command, return in chunks
+        client.println(HTML_CHUNKED);
+        for (int i=0; readline(); i++) {
+            Serial.print("<<"); Serial.println(req);
+            if (req.startsWith("---CMD")) break;
+            int len = req.length();
+            if (len > 0) forth_outer(req.c_str(), send_chunk);
+        }
+        Serial.println("\n--done");
+        send_chunk(0, "\r\n");      // terminate chunk stream
+    }
+    void setup(const char *ssid, const char *pass) {
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(ssid, pass);
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+        }
+        Serial.print("WiFi Connected. Server IP="); Serial.print(WiFi.localIP());
+        server.begin(80);
+        Serial.println(" port 80");
+    }
+    void handle_client() {
+        if (!(client = server.available())) return;
+        while (readline()) {        // fetching from WiFiClient
+            Serial.print("<<"); Serial.print(req);
+            if (req.startsWith("GET /")) {
+                Serial.println("=>GET");
+                handle_index();
+                break;
+            } 
+            else if (req.startsWith("POST /input")) {
+                Serial.println("=>POST\n");
+                handle_input();
+                break;
+            }
+        }
+        client.stop();
+        yield();
+    }
+};
+
 ///==========================================================================
 /// ESP32 routines
 ///==========================================================================
-String console_cmd;
-void setup() {
-    Serial.begin(115200);
-    delay(100);
-
+void robot_setup() {
     // Setup timer and attach timer to a led pin
-    ledcSetup(0, 100, LEDC_TIMER_13_BIT);
+    ledcSetup(0, 100, 13);
     ledcAttachPin(5, 0);
-    analogWrite(0, 250, BRIGHTNESS);
+    analogWrite(0, 250, 255);
     pinMode(2,OUTPUT);
     digitalWrite(2, HIGH);   // turn the LED2 on
     pinMode(16,OUTPUT);
@@ -708,42 +776,28 @@ void setup() {
     digitalWrite(18, LOW);   // motor2 forward
     pinMode(19,OUTPUT);
     digitalWrite(19, LOW);   // motor2 bacward
-    ///
-    /// ForthVM initalization
-    ///
-    LOGF("Booting esp32forth v8.4 ...");
-    forth_init();
-    forth_load("/load.txt");    // compile \data\load.txt
+}
+
+String console_cmd;
+void setup() {
+    Serial.begin(115200);
+    delay(100);
     
-    //  WiFi.config(ip, gateway, subnet);
-    WiFi.mode(WIFI_STA);
-    // attempt to connect to Wifi network:
-    WiFi.begin(ssid, pass);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print("."); }
-    LOGF("WiFi connected, IP Address: ");
-    LOG(WiFi.localIP());
-    // Setup web server handlers
-    server.on("/", HTTP_GET, []() {
-        server.send(200, "text/html", index_html); });
-    server.on("/input", HTTP_POST, handleInput);
-    server.begin();
-    LOGF("HTTP server started");
-    mem_stat();
+    robot_setup();
+    ForthServer::setup(WIFI_SSID, WIFI_PASS);
+    forth_setup();
     console_cmd.reserve(256);
-    LOGF("\nesp32forth8.4");
 }
 
 void loop(void) {
-    server.handleClient(); // ESP32 handle web requests
+    ForthServer::handle_client();
     delay(2);              // yield to background tasks (interrupt, timer,...)
     ///
     /// while Web requests come in from handleInput asynchronously,
     /// we also take user input from console (for debugging mostly)
     ///
     // for debugging: we can also take user input from Serial Monitor
-    static auto send_to_con = [](const char *rst) { LOG(rst); };
+    static auto send_to_con = [](int len, const char *rst) { LOG(rst); };
     if (Serial.available()) {
         console_cmd = Serial.readString();
         LOG(console_cmd);
