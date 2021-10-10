@@ -432,7 +432,7 @@ function chunk(ary, d) {                        // recursive call to sequence PO
         if (rsp !== null) {
             log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
             log.scrollTop=log.scrollHeight      // scroll down
-            chunk(ary.splice(30), d+1) }})}     // next 30 lines
+            chunk(ary.splice(0,30), d+1) }})}   // next 30 lines
 function forth() {
     let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
     let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
