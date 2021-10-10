@@ -258,13 +258,15 @@ void ss_dump() {
 ///
 /// dump pmem at p0 offset for sz bytes
 ///
-void mem_dump(IU p0, DU sz) {           // Dr. Ting's implementation
-    fout << setbase(16) << setfill(' ');
-    for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=0x20) {
+void mem_dump(IU p0, DU sz) {
+    fout << setbase(16) << setfill('0') << '\n';
+    for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=16) {
         fout << setw(4) << i << ": ";
-        for (int j=0; j<0x20; j+=2) {
-            IU *n = (IU*)&pmem[i+j]; fout << setw(4) << *n << ' ';}
-        for (int j=0; j<0x20; j++) {   // print and advance to next byte
+        for (int j=0; j<16; j++) {
+            char c = pmem[i+j];
+            fout << setw(2) << (int)c << (j%4==3 ? "  " : " ");
+        }
+        for (int j=0; j<16; j++) {   // print and advance to next byte
             char c = pmem[i+j] & 0x7f;
             fout << (char)((c==0x7f||c<0x20) ? '_' : c);
         }
@@ -610,12 +612,10 @@ void forth_setup() {
     ///
     /// ForthVM initalization
     ///
-    LOGF("Booting esp32forth v8.4 ...");
     forth_init();
 //    forth_load("/load.txt");    // compile /data/load.txt
 
     mem_stat();
-    LOGF("\nesp32forth8.4");
 }
 ///==========================================================================
 /// ESP32 Web Serer connection and index page
@@ -644,28 +644,25 @@ Content-type:text/html
 let log = document.getElementById('log')
 let tib = document.getElementById('tib')
 let idx = 0
-async function send_post(url, id, req) {
+function send_post(url, ary) {
+    let id  = '_'+(idx++).toString()
     let cmd = '\n---CMD'+id+'\n'
-    const rsp = await fetch(url, {
+    let req = ary.slice(0,30).join('\n')
+    log.innerHTML += '<div id='+id+'><font color=blue>'+req.replace(/\n/g,'<br/>')+'</font></div>'
+    fetch(url, {
         method: 'POST', headers: { 'Context-Type': 'text/plain' },
         body: cmd+req+cmd
+     }).then(rsp=>rsp.text()).then(txt=>{
+        document.getElementById(id).innerHTML +=
+            txt.replace(/\n/g,'<br/>').replace(/\s/g,'&nbsp;')
+        log.scrollTop=log.scrollHeight
+        ary.splice(0,30)
+        if (ary.length > 0) send_post(url, ary)
     })
-    return rsp.text()
 }
-async function forth() {
+function forth() {
     let ary = tib.value.split('\n')
-    for (let i=0; i<ary.length; i+=6) {
-        let id = '_'+(idx++).toString();
-        log.innerHTML += '<div id='+id+'></div>'
-        send_post('/input', id, ary.slice(i, i+6).join('\n'))
-        .then(txt=>{
-            console.log(txt)
-            document.getElementById(id).innerHTML +=
-                txt.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
-            log.scrollTop=log.scrollHeight
-        })
-        await new Promise(r => setTimeout(r, 200))
-    }
+    send_post('/input', ary)
     tib.value = ''
 }
 window.onload = ()=>{ tib.focus() }
@@ -683,49 +680,58 @@ Transfer-Encoding: chunked
 namespace ForthServer {
     WiFiServer server;
     WiFiClient client;
-    String req;
+    String     http_req;
     int readline() {
-        req.clear();
+        http_req.clear();
         while (client.connected()) {
             if (client.available()) {
                 char c = client.read();
-                Serial.print(c);
                 if (c == '\n') return 1;
-                if (c != '\r') req += c;
+                if (c != '\r') http_req += c;
             }
         }
         return 0;
     }
     void handle_index() {
-        client.println(HTML_INDEX);
+        client.println(HTML_INDEX);                 /// 
         delay(30);                   // give browser sometime to receive
     }
     void send_chunk(int len, const char *msg) {
-        Serial.print("<"); Serial.print(len); Serial.print(">");
         Serial.print(msg);
         client.println(len, HEX);
         client.println(msg);
         yield();
     }
     void handle_input() {
-        // skip header
-        while (readline() && req.length()>0) {
-            Serial.print("--"); Serial.print(req);
-        }
-        // find Forth commmand header
-        for (int i=0; i<4 && readline(); i++) {
-            if (req.startsWith("---CMD")) break;
+        while (readline() && http_req.length()>0);  /// skip HTTP header
+        for (int i=0; i<4 && readline(); i++) {     /// find Forth command token
+            if (http_req.startsWith("---CMD")) break;
         }
         // process Forth command, return in chunks
-        client.println(HTML_CHUNKED);
+        client.println(HTML_CHUNKED);               /// send HTTP chunked header
         for (int i=0; readline(); i++) {
-            Serial.print("<<"); Serial.println(req);
-            if (req.startsWith("---CMD")) break;
-            int len = req.length();
-            if (len > 0) forth_outer(req.c_str(), send_chunk);
+            if (http_req.startsWith("---CMD")) break;
+            if (http_req.length() > 0) {
+                Serial.println(http_req);           /// echo on console
+                forth_outer(http_req.c_str(), send_chunk);
+            }
         }
-        Serial.println("\n--done");
-        send_chunk(0, "\r\n");      // terminate chunk stream
+        send_chunk(0, "\r\n");                      /// close HTTP chunk stream
+    }
+    void handle_client() {                          /// uri router
+        if (!(client = server.available())) return;
+        while (readline()) {
+            if (http_req.startsWith("GET /")) {
+                handle_index();
+                break;
+            } 
+            else if (http_req.startsWith("POST /input")) {
+                handle_input();
+                break;
+            }
+        }
+        client.stop();
+        yield();
     }
     void setup(const char *ssid, const char *pass) {
         WiFi.mode(WIFI_STA);
@@ -737,24 +743,8 @@ namespace ForthServer {
         Serial.print("WiFi Connected. Server IP="); Serial.print(WiFi.localIP());
         server.begin(80);
         Serial.println(" port 80");
-    }
-    void handle_client() {
-        if (!(client = server.available())) return;
-        while (readline()) {        // fetching from WiFiClient
-            Serial.print("<<"); Serial.print(req);
-            if (req.startsWith("GET /")) {
-                Serial.println("=>GET");
-                handle_index();
-                break;
-            } 
-            else if (req.startsWith("POST /input")) {
-                Serial.println("=>POST\n");
-                handle_input();
-                break;
-            }
-        }
-        client.stop();
-        yield();
+        // reserve string space
+        http_req.reserve(256);
     }
 };
 
@@ -787,6 +777,7 @@ void setup() {
     ForthServer::setup(WIFI_SSID, WIFI_PASS);
     forth_setup();
     console_cmd.reserve(256);
+    LOGF("\nesp32forth8.4\n");
 }
 
 void loop(void) {
