@@ -7,6 +7,10 @@
 #include <exception>    // try...catch, throw (disable for less capable MCU)
 #include "SPIFFS.h"     // flash memory
 ///
+/// control whether lambda capture parameter
+/// Note:  0 reduces 100ms/1M cycles 
+#define  LAMBDA_CAP    0
+///
 /// logical units (instead of physical) for type check and portability
 ///
 typedef uint16_t IU;    // instruction pointer unit
@@ -49,6 +53,7 @@ struct List {
 ///
 /// functor implementation - for lambda support (without STL)
 ///
+#if LAMBDA_CAP
 struct fop { virtual void operator()(IU) = 0; };
 template<typename F>
 struct XT : fop {           // universal functor
@@ -56,15 +61,19 @@ struct XT : fop {           // universal functor
     XT(F &f) : fp(f) {}
     void operator()(IU c) { fp(c); }
 };
+#else
+typedef void (*fop)();
+#endif // LAMBDA_CAP
 ///
 /// universal Code class
 /// Note:
 ///   * 8-byte on 32-bit machine, 16-byte on 64-bit machine
 ///
+#if LAMBDA_CAP
 struct Code {
     const char *name = 0;   /// name field
     union {                 /// either a primitive or colon word
-        fop *xt = 0;        /// lambda pointer
+        fop xt = 0;         /// lambda pointer
         struct {            /// a colon word
             U16 def:  1;    /// colon defined word
             U16 immd: 1;    /// immediate flag
@@ -79,6 +88,24 @@ struct Code {
     }
     Code() {}               /// create a blank struct (for initilization)
 };
+#else
+struct Code {
+    const char *name = 0;   /// name field
+    union {                 /// either a primitive or colon word
+        fop xt = 0;         /// lambda pointer
+        struct {            /// a colon word
+            U16 def:  1;    /// colon defined word
+            U16 immd: 1;    /// immediate flag
+            U16 len:  14;   /// len of pf (16K max)
+            IU  pfa;        /// offset to pmem space (16-bit for 64K range)
+        };
+    };
+    Code(const char *n, fop f, bool im=false) : name(n), xt(f) {
+        immd = im ? 1 : 0;
+    }
+    Code() {}               /// create a blank struct (for initilization)
+};
+#endif // LAMBDA_CAP
 ///==============================================================================
 ///
 /// main storages in RAM
@@ -118,6 +145,9 @@ U8   *IP = 0, *IP0 = 0;   /// current instruction pointer and base pointer
 #define SETJMP(a) (*(IU*)(PFA(-1) + (a)))   /** address offset for branching opcodes     */
 #define HERE      (pmem.idx)                /** current parameter memory index           */
 #define IPOFF     ((IU)(IP - &pmem[0]))     /** IP offset relative parameter memory root */
+#define CALL(w)   \
+    if (dict[w].def) nest(w); \
+    else ((fop)(((uintptr_t)dict[w].xt)&~0x3))()
 ///==============================================================================
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
@@ -154,9 +184,13 @@ void colon(const char *name) {
     char *nfa = STR(HERE);                  // current pmem pointer
     int sz = STRLEN(name);                  // string length, aligned
     pmem.push((U8*)name,  sz);              // setup raw name field
+#if LAMBDA_CAP
     Code c(nfa, [](int){});                 // create a new word on dictionary
-    c.def  = 1;                             // specify a colon word
-    c.len  = 0;                             // advance counter (by number of U16)
+#else
+    Code c(nfa, NULL);
+#endif // LAMBDA_CAP
+    c.def = 1;                              // specify a colon word
+    c.len = 0;                              // advance counter (by number of U16)
     c.pfa = HERE;                           // capture code field index
     dict.push(c);                           // deep copy Code struct into dictionary
 };
@@ -164,11 +198,6 @@ void colon(const char *name) {
 /// Forth inner interpreter
 ///
 void nest(IU c) {
-    if (!dict[c].def) {                     /// * is a primitive?
-        /// handles a primitive
-        (*(fop*)(((uintptr_t)dict[c].xt)&~0x3))(c);  ///> mask out immd (and def), and execute
-        return;
-    }
     /// handles a colon word
     rs.push((DU)(IP - IP0)); rs.push(WP);   /// * setup call frame
     IP0 = IP = PFA(WP=c);                   // CC: this takes 30ms/1K, need work
@@ -177,7 +206,7 @@ void nest(IU c) {
     try {                                   // CC: is dict[c] kept in cache?
         while ((IU)(IP - IP0) < n) {        /// * recursively call all children
             IU c1 = *IP; IP += sizeof(IU);  // CC: cost of (n, c1) on stack?
-            nest(c1);                       ///> execute child word
+            CALL(c1);                       ///> execute child word
         }                                   ///> can do IP++ if pmem unit is 16-bit
     }
     catch(...) {}                           ///> protect if any exeception
@@ -259,7 +288,7 @@ void ss_dump() {
 /// dump pmem at p0 offset for sz bytes
 ///
 void mem_dump(IU p0, DU sz) {
-    fout << setbase(16) << setfill('0') << '\n';
+    fout << setbase(16) << setfill('0') << ENDL;
     for (IU i=ALIGN32(p0); i<=ALIGN32(p0+sz); i+=16) {
         fout << setw(4) << i << ": ";
         for (int j=0; j<16; j++) {
@@ -283,8 +312,13 @@ inline char *NEXT_WORD()  { fin >> strbuf; return (char*)strbuf.c_str(); } // ge
 inline char *SCAN(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
 inline DU   PUSH(DU v)    { ss.push(top); return top = v;         }
 inline DU   POP()         { DU n=top; top=ss.pop(); return n;     }
+#if LAMBDA_CAP
 #define     CODE(s, g)    { s, [](int c){ g; }, 0 }
 #define     IMMD(s, g)    { s, [](int c){ g; }, 1 }
+#else
+#define     CODE(s, g)    { s, []{ g; }, 0 }
+#define     IMMD(s, g)    { s, []{ g; }, 1 }
+#endif // LAMBDA_CAP
 #define     BOOL(f)       ((f)?-1:0)
 ///
 /// global memory access macros
@@ -472,7 +506,7 @@ static Code prim[] PROGMEM = {
     /// @defgroup metacompiler
     /// @{
     CODE("exit",  throw " "),
-    CODE("exec",  nest(POP())),
+    CODE("exec",  CALL(POP())),
     CODE("does",  /* TODO */),
     CODE("to",    /* TODO */),
     CODE("is",    /* TODO */),
@@ -530,20 +564,20 @@ void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
     fout.str("");                            /// clean output buffer, ready for next run
     while (fin >> strbuf) {
         const char *idiom = strbuf.c_str();
-        // printf("%s=>", idiom);
+        printf("%s=>", idiom);
         int w = find(idiom);                 /// * search through dictionary
         if (w>=0) {                          /// * word found?
-            // printf("%s %d\n", dict[w].name, w);
+            printf("%s %d\n", dict[w].name, w);
             if (compile && !dict[w].immd) {  /// * in compile mode?
                 ADD_IU(w);                   /// * add found word to new colon word
             }
-            else nest(w);                    /// * execute forth word
+            else CALL(w);                    /// * execute forth word
             continue;
         }
         // try as a number
         char *p;
         int n = static_cast<int>(strtol(idiom, &p, base));
-        // printf("%d\n", n);
+        printf("%d\n", n);
         if (*p != '\0') {                    /// * not number
             fout << idiom << "? " << ENDL;   ///> display error prompt
             compile = false;                 ///> reset to interpreter mode
@@ -777,7 +811,7 @@ void setup() {
     ForthServer::setup(WIFI_SSID, WIFI_PASS);
     forth_setup();
     console_cmd.reserve(256);
-    LOGF("\nesp32forth8.4\n");
+    LOGF("\nesp32forth8\n");
 }
 
 void loop(void) {
