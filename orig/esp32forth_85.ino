@@ -34,24 +34,23 @@ istringstream fin;      /// ForthVM input stream
 ostringstream fout;     /// ForthVM output stream
 ///
 /// ForthVM global variables
-///   Note: the iData macro increase 1M throughput by 8%
 ///
 int rack[256] = { 0 };
 int stack[256] = { 0 };
-U8  cData[1024*64] = {};           // 64K
-#define iData(a)  *(U32*)&cData[a]
-
 int top;
 U8  R = 0, S = 0, bytecode;
-U32 P, IP, WP, nfa;
-U32 DP, thread, context;
+U32 P, IP, WP, lfa, nfa, cfa, pfa;
+U32 DP, thread, context, does;  // here, privious nfa, current nfa
 int ucase = 1, compile = 0, base = 16;
-string idiom;                      // ForthVM input buffer
+string idiom;
 
-void next()       { P = iData(IP); WP = P; IP += 4; }
+U32 iData[16000] = {};             // 64K
+U8  *cData = (U8*)iData;
+
+void next()       { P = iData[IP >> 2]; WP = P; IP += 4; }
 void nest()       { pushR = IP; IP = WP + 4; next(); }
 void unnest()     { IP = popR; next(); }
-void comma(int n) { iData(DP) = n; DP += 4; }
+void comma(int n) { iData[DP >> 2] = n; DP += 4; }
 void comma_s(int lex, string s) {
     comma(lex);
     int len = cData[DP++] = s.length();
@@ -66,7 +65,7 @@ void dot_r(int n, int v) {
 }
 int find(string s) {            // scan dictionary, return cfa found or 0
     int len_s = s.length();
-    nfa = context;
+    nfa = context; lfa = DP;
     while (nfa) {
         int len = (int)cData[nfa] & 0x1f;
         if (len_s == len) {
@@ -79,13 +78,32 @@ int find(string s) {            // scan dictionary, return cfa found or 0
             }
             if (ok) {
                 yield();
-                return ALIGN(nfa + len + 1);
+                cfa = ALIGN(nfa + len + 1);
+                pfa = cfa + 4;
+                return cfa;
             }
         }
-        nfa = iData(nfa - 4);           // link field to previous word
+        lfa = nfa -4;            // need to see
+        nfa = iData[lfa >> 2];   // link field to previous word
     }
     yield();
     return 0;
+}
+void printName(int n) {
+    nfa = context;
+    while (nfa) {
+        int len = (int)cData[nfa] & 0x1f;
+        cfa = ALIGN(nfa + len + 1);
+        if (n == cfa) {
+            for (int i=0; i<len; i++) {
+                fout << (char)cData[nfa+1+i];
+            }
+            fout << ' ';
+            return;
+        }
+        nfa = iData[(nfa-4) >> 2];   // link field to previous word
+    }
+    fout << n << ' ';
 }
 void words() {
     int n = 0;
@@ -97,23 +115,24 @@ void words() {
             fout << cData[nfa + 1 + i];
         if ((++n % 10) == 0) { fout << ENDL; }
         else                 { fout << ' ';  }
-        nfa = iData(nfa - 4);         // link field to previous word
+        nfa = iData[(nfa - 4) >> 2];   // link field to previous word
     }
     fout << ENDL;
 }
 void dump(int a, int n) {
     fout << setbase(16) << ENDL;
     for (int r = 0, sz = ((n+15)/16); r < sz; r++) {
-        int p0 = a + r * 16;
+        int p0 = a + r * 16, p = p0;
         char sum = 0;
         fout <<setw(4) << p << ": ";
-        for (int p = p0, i = 0; i < 16; i++, p++) {
+        for (int i = 0; i < 16; i++) {
             sum += cData[p];
-            fout <<setw(2) << (int)cData[p] << ' ';
+            fout <<setw(2) << (int)cData[p++] << ' ';
         }
         fout << setw(4) << (sum & 0xff) << "  ";
-        for (int p = p0, i = 0; i < 16; i++, p++) {
-            sum = cData[p] & 0x7f;
+        p = p0;
+        for (int i = 0; i < 16; i++) {
+            sum = cData[p++] & 0xff;
             fout <<(char)((sum < 0x20) ? '_' : sum);
         }
         fout << ENDL;
@@ -216,7 +235,7 @@ static struct Code primitives[] = {
          int len = cData[IP++];
          for (int i = 0; i < len; i++) fout << cData[IP++];
          IP = ALIGN(IP)),
-    CODE("dolit", push iData(IP); IP += 4),
+    CODE("dolit", push iData[IP >> 2]; IP += 4),
     CODE("dovar", push WP + 4),
     IMMD("[",     compile = 0),
     CODE("]",     compile = 1),
@@ -226,27 +245,27 @@ static struct Code primitives[] = {
     IMMD("$*",    comma_s(find("dostr"), next_idiom('"'))),
     IMMD(".\"",   comma_s(find("dotstr"), next_idiom('"'))),
     /// Branching ops
-    CODE("branch", IP = iData(IP); next()),
+    CODE("branch", IP = iData[IP >> 2]; next()),
     CODE("0branch",
-         if (top == 0) IP = iData(IP);
+         if (top == 0) IP = iData[IP >> 2];
          else IP += 4;  pop; next()),
     CODE("donext",
          if (rack[R]) {
-             rack[R] -= 1; IP = iData(IP);
+             rack[R] -= 1; IP = iData[IP >> 2];
          }
          else { IP += 4;  R--; }
          next()),
     IMMD("if",    comma(find("0branch")); push DP; comma(0)),
     IMMD("else",
-         comma(find("branch")); iData(top) = DP + 4;
+         comma(find("branch")); iData[top >> 2] = DP + 4;
          top = DP; comma(0)),
-    IMMD("then", iData(top) = DP; pop),
+    IMMD("then", iData[top >> 2] = DP; pop),
     /// Loops
     IMMD("begin",  push DP),
     IMMD("while", comma(find("0branch")); push DP; comma(0)),
     IMMD("repeat",
          comma(find("branch")); int n = top; pop;
-         comma(top); pop; iData(n) = DP),
+         comma(top); pop; iData[n >> 2] = DP),
     IMMD("again", comma(find("branch")); comma(top); pop),
     IMMD("until", comma(find("0branch")); comma(top); pop),
     ///  For loops
@@ -257,7 +276,9 @@ static struct Code primitives[] = {
     IMMD("next",  comma(find("donext")); comma(top); pop),
     ///  Compiler ops
     CODE("exit",  IP = popR; next()),
-    CODE("docon", push iData(WP + 4)),
+    CODE("docon", push iData[(WP + 4) >> 2]),
+    CODE("dodoes", 
+         pushR =IP; IP = iData[(WP + 4) >> 2]; push (WP+8); next(); ),
     CODE(":",
          thread = DP + 4; comma_s(context, next_idiom());
          comma(cData[find("nest")]); compile = 1),
@@ -266,16 +287,16 @@ static struct Code primitives[] = {
          comma(find("unnest"))),
     CODE("variable",
          thread = DP + 4; comma_s(context, next_idiom());
-         context = thread;
+         context = thread; does = DP;
          comma(cData[find("dovar")]); comma(0)),
     CODE("constant",
          thread = DP + 4; comma_s(context, next_idiom());
          context = thread;
          comma(cData[find("docon")]); comma(top); pop),
-    CODE("@",  top = iData(top)),
-    CODE("!",  int a = top; pop; iData(a) = top; pop),
-    CODE("?",  fout << iData(top) << " "; pop),
-    CODE("+!", int a = top; pop; iData(a) += top; pop),
+    CODE("@",  top = iData[top >> 2]),
+    CODE("!",  int a = top; pop; iData[a >> 2] = top; pop),
+    CODE("?",  fout << iData[top >> 2] << " "; pop),
+    CODE("+!", int a = top; pop; iData[a >> 2] += top; pop),
     CODE("allot",
          int n = top; pop;
          for (int i = 0; i < n; i++) cData[DP++] = 0),
@@ -283,17 +304,25 @@ static struct Code primitives[] = {
     /// metacompiler
     CODE("create",
          thread = DP + 4; comma_s(context, next_idiom());
-         context = thread;
-         comma(find("nest")); comma(find("dovar"))),
-    CODE("does", comma(find("nest"))), // copy words after "does" to new the word
+         context = thread; does = DP;
+         comma(cData[find("dovar")]); ),
+    CODE("<builds",
+         thread = DP + 4; comma_s(context, next_idiom());
+         context = thread; does = DP;
+         comma(cData[find("dovar")]); comma(0)),
+    CODE("does>", 
+         iData[does>>2] = cData[find("dodoes")];// change target to colon
+         iData[(does+4)>>2] = IP; unnest(); ),   // target interpreter
     CODE("to",                         // n -- , compile only
          int n = find(next_idiom());
-         iData(n + 4) = top; pop),
+         iData[(n + 4) >> 2] = top; pop; ),
     CODE("is",                         // w -- , execute only
          int n = find(next_idiom());
-         iData(n) = top; pop),
+         iData[(n + 4) >> 2] = top; pop;
+         iData[(n + 8) >> 2] = find("unnest"); ),
     CODE("[to]",
-         int n = iData(IP); iData(n + 4) = top; pop),
+         int n = iData[IP >> 2]; iData[(n + 4) >> 2] = top; pop;
+         IP += 4; ),
     /// Debug ops
     CODE("bye",   exit(0)),
     CODE("here",  push DP),
@@ -301,8 +330,9 @@ static struct Code primitives[] = {
     CODE("dump",  int n = top; pop; int a = top; pop; dump(a, n)),
     CODE("'" ,    push find(next_idiom())),
     CODE("see",
-         int n = find(next_idiom());
-         for (int i = 0; i < 80; i+=4) fout << iData(n + i);
+         int n = find(next_idiom());  // n=cfa, pfa and lfa bracket token list
+         for (int i = pfa; i < lfa; i+=4) printName(iData[i >> 2]);
+//         for (int i = pfa; i < lfa; i+=4) fout<<(iData[(i >> 2)])<<' ';
          fout << ENDL),
     CODE("ucase", ucase = top; pop),
     CODE("clock", push millis()),
@@ -325,7 +355,7 @@ void encode(struct Code* prim) {     /// DP, thread, and P updated
     string seq = prim->name;
     int immd = prim->immd;
     int len  = seq.length();
-    comma(thread);                   /// lfa: link field (U32)
+    comma(thread);                  /// lfa: link field (U32)
     thread = DP;
     cData[DP++] = len | immd;        /// nfa: word length + immediate bit
     for (int i = 0; i < len; i++) { cData[DP++] = seq[i]; }
@@ -345,9 +375,9 @@ void forth_init() {
         encode(&primitives[i]);
     }
     context = DP - 12;               /// lfa: 12 = ALIGN("boot"+1)+sizeof(U32)
-    LOG("\nDP=");     LOGH(DP);
-    LOG(" link=");    LOGH(context);
-    LOG(" Words=");   LOGH(P);
+    LOG("\nDP=0x");     LOGH(DP);
+    LOG(" link=0x");    LOGH(context);
+    LOG(" Words=0x");   LOGH(P);
     LOG("\n");
     // Boot Up
     P = WP = IP = 0;
@@ -388,58 +418,41 @@ const char *pass = "8551666595";
 
 WebServer server(80);
 
-/******************************************************************************/
-/* ledc                                                                       */
-/******************************************************************************/
-/* LEDC Software Fade */
-// use first channel of 16 channels (started from zero)
-#define LEDC_CHANNEL_0     0
-// use 13 bit precission for LEDC timer
-#define LEDC_TIMER_13_BIT  13
-// use 5000 Hz as a LEDC base frequency
-#define LEDC_BASE_FREQ     5000
-// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
-#define LED_PIN            5
-#define BRIGHTNESS         255    // how bright the LED is
-
-static const char *index_html PROGMEM = R"XX(
-<html><head><meta charset='UTF-8'><title>esp32forth</title>
-<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>
-</head>
-<body>
-    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
-         background-color:#f8f0f0;'>esp32Forth v8</div>
-    <textarea id='tib' style='height:600px;width:400px;'
-        onkeydown='if (13===event.keyCode) forth()'>words</textarea>
-</body>
-<script>
-let log = document.getElementById('log')
-let tib = document.getElementById('tib')
-function httpPost(url, items, callback) {
-    let fd = new FormData()
-    for (k in items) { fd.append(k, items[k]) }
-    let r = new XMLHttpRequest()
-    r.onreadystatechange = function() {
-        if (this.readyState != XMLHttpRequest.DONE) return
-        callback(this.status===200 ? this.responseText : null) }
-    r.open('POST', url)
-    r.send(fd) }
-function chunk(ary, d) {                        // recursive call to sequence POSTs
-    req = ary.slice(0,30).join('\n')            // 30*(average 50 byte/line) ~= 1.5K
-    if (req=='' || d>20) return                 // bail looping, just in case
-    log.innerHTML+='<font color=blue>'+req.replace(/\n/g, '<br/>')+'</font>'
-    httpPost('/input', { cmd: req }, rsp=>{
-        if (rsp !== null) {
-            log.innerHTML += rsp.replace(/\n/g, '<br/>').replace(/\s/g,'&nbsp;')
-            log.scrollTop=log.scrollHeight      // scroll down
-            chunk(ary.splice(0,30), d+1) }})}   // next 30 lines
-function forth() {
-    let str = tib.value.replace(/\\.*\n/g,'').split(/(\(\s[^\)]+\))/)
-    let cmd = str.map(v=>v[0]=='(' ? v.replaceAll('\n',' ') : v).join('')
-    chunk(cmd.split('\n'), 1); tib.value = '' }
-window.onload = ()=>{ tib.focus() }
-</script></html>
-)XX";
+static const char *index_html =
+    "<html><head><meta charset='UTF-8'><title>esp32forth</title>\n"
+    "<style>body{font-family:'Courier New',monospace;font-size:12px;}</style>\n"
+    "</head>\n"
+    "<body>\n"
+    "    <div id='log' style='float:left;overflow:auto;height:600px;width:600px;\n"
+    "         background-color:#f8f0f0;'>ESP32Forth 8.02</div>\n"
+    "    <textarea id='tib' style='height:600px;width:400px;'\n"
+    "        onkeydown='if (13===event.keyCode) forth()'>words</textarea>\n"
+    "</body>\n"
+    "<script>\n"
+    "let log = document.getElementById('log')\n"
+    "let tib = document.getElementById('tib')\n"
+    "function httpPost(url, items, callback) {\n"
+    "    let fd = new FormData()\n"
+    "    for (k in items) { fd.append(k, items[k]) }\n"
+    "    let r = new XMLHttpRequest()\n"
+    "    r.onreadystatechange = function() {\n"
+    "        if (this.readyState != XMLHttpRequest.DONE) return\n"
+    "        callback(this.status===200 ? this.responseText : null)\n"
+    "    }\n"
+    "    r.open('POST', url)\n"
+    "    r.send(fd)\n"
+    "}\n"
+    "function forth() {\n"
+    "    log.innerHTML+='<font color=blue>'+tib.value+'<br/></font>'\n"
+    "    httpPost('/input', { cmd: tib.value + '\\n' },function(rsp) {\n"
+    "        if (rsp !== null) {\n"
+    "            log.innerHTML += rsp.replace(/\\n/g, '<br/>').replace(/\\s/g,'&nbsp;')\n"
+    "            log.scrollTop=log.scrollHeight }})\n"
+    "    tib.value = ''\n"
+    "}\n"
+    "window.onload = ()=>{ tib.focus() }\n"
+    "</script></html>\n"
+    ;
 ///==========================================================================
 /// ForthVM front-end handlers
 ///==========================================================================
@@ -463,13 +476,13 @@ static int forth_load(const char *fname) {
     if (!file) {
         LOG("Error opening file:"); LOG(fname); return 1; }
     LOG("Loading file: /data"); LOG(fname); LOG("...\n");
-    while (file.available()) {
-        // retrieve command from Flash memory
-        String cmd = file.readStringUntil('\n');
-        LOG("<< "+cmd+"\n");  // display bootstrap command on console
-        // send it to Forth command processor
-        process_command(cmd);
-    }
+//    while (file.available()) {
+    // retrieve command from Flash memory
+    String cmd = file.readStringUntil('\0');
+    // LOG("<< "+cmd+"\n");  // display bootstrap command on console
+    // send it to Forth command processor
+    process_command(cmd);
+//    }
     LOG("Done loading.\n");
     file.close();
     SPIFFS.end();
@@ -520,7 +533,7 @@ void setup() {
     delay(100);
     ledcSetup(0, 100, 13);
     ledcAttachPin(5, 0);
-    analogWrite(0, 250, 255);
+    analogWrite(0, 250, 255);// turn speaker on
     pinMode(2,OUTPUT);
     digitalWrite(2, HIGH);   // turn the LED2 on
     pinMode(16,OUTPUT);
@@ -531,15 +544,15 @@ void setup() {
     digitalWrite(18, LOW);   // motor2 forward
     pinMode(19,OUTPUT);
     digitalWrite(19, LOW);   // motor2 bacward
-    analogWrite(0, 0, 255);
     //  WiFi.config(ip, gateway, subnet);
     WiFi.mode(WIFI_STA);
     // attempt to connect to Wifi network:
     WiFi.begin(ssid, pass);
+    LOG("\nStart ESP32 \nWiFi connecting ");
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         LOG("."); }
-    LOG("WiFi connected, IP Address: ");
+    LOG("\nWiFi connected \nIP Address: ");
     LOG(WiFi.localIP());
     server.begin();
     // Setup web server handlers
@@ -556,6 +569,7 @@ void setup() {
     forth_load("/load.txt");
     mem_stat();
     LOG("\nesp32Forth v8.5\n");
+    analogWrite(0, 0, 255);// turn speaker off
 }
 void loop(void) {
     server.handleClient(); // ESP32 handle web requests
@@ -564,7 +578,7 @@ void loop(void) {
         console_cmd = Serial.readString();
         LOG(console_cmd);
         LOG(process_command(console_cmd));
-        mem_stat();
+//        mem_stat();
         delay(2);
     }
 }
