@@ -8,7 +8,11 @@
 #include "SPIFFS.h"     // flash memory
 ///
 /// control whether lambda capture parameter
-/// Note:  0 reduces 100ms/1M cycles 
+/// Note:
+///    LAMBDA_CAP   0 cut 80ms/1M cycles
+///    RANGE_CHECK  0 cut 100ms/1M cycles
+///
+#define  RANGE_CHECK   0
 #define  LAMBDA_CAP    0
 ///
 /// logical units (instead of physical) for type check and portability
@@ -38,6 +42,7 @@ struct List {
     List()  { v = new T[N]; }      /// dynamically allocate array memory
     ~List() { delete[] v;   }      /// free the memory
     T& operator[](int i)   { return i < 0 ? v[idx + i] : v[i]; }
+#if RANGE_CHECK
     T pop() {
         if (idx>0) return v[--idx];
         throw "ERR: List empty";
@@ -46,6 +51,10 @@ struct List {
         if (idx<N) return v[max=idx++] = t;
         throw "ERR: List full";
     }
+#else
+    T pop()     { return v[--idx]; }
+    T push(T t) { return v[max=idx++] = t; }
+#endif // RANGE_CHECK    
     void push(T *a, int n)  { for (int i=0; i<n; i++) push(*(a+i)); }
     void merge(List& a)     { for (int i=0; i<a.idx; i++) push(a[i]);}
     void clear(int i=0)     { idx=i; }
@@ -73,7 +82,7 @@ typedef void (*fop)();
 struct Code {
     const char *name = 0;   /// name field
     union {                 /// either a primitive or colon word
-        fop xt = 0;         /// lambda pointer
+        fop xt = 0;         /// lambda pointer (4-byte aligned, thus bit[0,1]=0)
         struct {            /// a colon word
             U16 def:  1;    /// colon defined word
             U16 immd: 1;    /// immediate flag
@@ -128,7 +137,7 @@ bool compile = false;
 DU   top = -1, base = 10;
 DU   ucase = 1;           /// case sensitivity control
 IU   WP = 0;              /// current word pointer
-U8   *IP = 0, *IP0 = 0;   /// current instruction pointer and base pointer
+U8   *IP = 0, *IP0 = 0;   /// current instruction pointer and cached base pointer
 ///
 /// macros to abstract dict and pmem physical implementation
 /// Note:
@@ -138,8 +147,6 @@ U8   *IP = 0, *IP0 = 0;   /// current instruction pointer and base pointer
 #define XIP       (dict[-1].len)            /** parameter field tail of latest word      */
 #define PFA(w)    ((U8*)&pmem[dict[w].pfa]) /** parameter field of a word                */
 #define CELL(a)   (*(DU*)&pmem[a])          /** fetch a cell from parameter memory       */
-#define HALF(a)   (*(U16*)&pmem[a])         /** fetch half a cell from parameter memory  */
-#define BYTE(a)   (*(U8*)&pmem[a])          /** fetch a byte from parameter memory       */
 #define STR(a)    ((char*)&pmem[a])         /** fetch string pointer to parameter memory */
 #define JMPIP     (IP0 + *(IU*)IP)          /** branching target address                 */
 #define SETJMP(a) (*(IU*)(PFA(-1) + (a)))   /** address offset for branching opcodes     */
@@ -166,8 +173,6 @@ int find(const char *s) {
 ///
 inline void ADD_IU(IU i)   { pmem.push((U8*)&i, sizeof(IU));  XIP+=sizeof(IU);  }  /** add an instruction into pmem */
 inline void ADD_DU(DU v)   { pmem.push((U8*)&v, sizeof(DU)),  XIP+=sizeof(DU);  }  /** add a cell into pmem         */
-inline void ADD_BYTE(U8 b) { pmem.push((U8*)&b, sizeof(U8));  XIP+=sizeof(U8);  }
-inline void ADD_HALF(U16 w){ pmem.push((U8*)&w, sizeof(U16)); XIP+=sizeof(U16); }
 inline void ADD_STR(const char *s) {                                               /** add a string to pmem         */
     int sz = STRLEN(s); pmem.push((U8*)s,  sz); XIP += sz;
 }
@@ -195,24 +200,23 @@ void colon(const char *name) {
     dict.push(c);                           // deep copy Code struct into dictionary
 };
 ///
-/// Forth inner interpreter
+/// Forth inner interpreter (handles a colon word)
 ///
+static U8 *PMEM0 = &pmem[0];                /// * cached base memory address
 void nest(IU c) {
-    /// handles a colon word
-    rs.push((DU)(IP - IP0)); rs.push(WP);   /// * setup call frame
+    rs.push(IP - PMEM0); rs.push(WP);       /// * setup call frame
     IP0 = IP = PFA(WP=c);                   // CC: this takes 30ms/1K, need work
-    // i.e. IP = ((U8*)&pmem[dict[c].pfa])
-    IU n = dict[c].len;                     // CC: this saved 300ms/1M
     try {                                   // CC: is dict[c] kept in cache?
-        while ((IU)(IP - IP0) < n) {        /// * recursively call all children
+        U8 *ipx = IP + dict[c].len;         // CC: this saved 350ms/1M
+        while (IP < ipx) {                  /// * recursively call all children
             IU c1 = *IP; IP += sizeof(IU);  // CC: cost of (n, c1) on stack?
             CALL(c1);                       ///> execute child word
         }                                   ///> can do IP++ if pmem unit is 16-bit
     }
     catch(...) {}                           ///> protect if any exeception
     yield();                                ///> give other tasks some time
-    IP0 = PFA(WP=rs.pop());                 /// * restore call frame
-    IP  = IP0 + rs.pop();
+    IP0 = PFA(WP = rs.pop());               /// * restore call frame
+    IP  = PMEM0 + rs.pop();
 }
 ///==============================================================================
 ///
@@ -336,6 +340,22 @@ inline DU   POP()         { DU n=top; top=ss.pop(); return n;     }
 ///
 static Code prim[] PROGMEM = {
     ///
+    /// @defgroup Executino control ops
+    /// @{
+    CODE("dovar",   PUSH(IPOFF); IP += sizeof(DU)),
+    CODE("dolit",   PUSH(*(DU*)IP); IP += sizeof(DU)),
+    CODE("dostr",
+        const char *s = (const char*)IP;            // get string pointer
+        PUSH(IPOFF); IP += STRLEN(s)),
+    CODE("dotstr",
+        const char *s = (const char*)IP;            // get string pointer
+        fout << s;  IP += STRLEN(s)),               // send to output console
+    CODE("branch" , IP = JMPIP),                                 // unconditional branch
+    CODE("0branch", IP = POP() ? IP + sizeof(IU) : JMPIP),       // conditional branch
+    CODE("donext",
+        if ((rs[-1] -= 1) >= 0) IP = JMPIP;                      // rs[-1]-=1 saved 2000ms/1M cycles
+        else { IP += sizeof(IU); rs.pop(); }),
+    /// @}
     /// @defgroup Stack ops
     /// @{
     CODE("dup",  PUSH(top)),
@@ -414,14 +434,6 @@ static Code prim[] PROGMEM = {
     /// @}
     /// @defgroup Literal ops
     /// @{
-    CODE("dovar",   PUSH(IPOFF); IP += sizeof(DU)),
-    CODE("dolit",   PUSH(*(DU*)IP); IP += sizeof(DU)),
-    CODE("dostr",
-        const char *s = (const char*)IP;            // get string pointer
-        PUSH(IPOFF); IP += STRLEN(s)),
-    CODE("dotstr",
-        const char *s = (const char*)IP;            // get string pointer
-        fout << s;  IP += STRLEN(s)),               // send to output console
     CODE("[",       compile = false),
     CODE("]",       compile = true),
     IMMD("(",       SCAN(')')),
@@ -439,8 +451,6 @@ static Code prim[] PROGMEM = {
     /// @defgroup Branching ops
     /// @brief - if...then, if...else...then
     /// @{
-    CODE("branch" , IP = JMPIP),                                 // unconditional branch
-    CODE("0branch", IP = POP() ? IP + sizeof(IU) : JMPIP),       // conditional branch
     IMMD("if",      ADD_WORD("0branch"); PUSH(XIP); ADD_IU(0)),  // if    ( -- here ) 
     IMMD("else",                                                 // else ( here -- there )
         ADD_WORD("branch");
@@ -460,9 +470,6 @@ static Code prim[] PROGMEM = {
     /// @defgrouop For loops
     /// @brief  - for...next, for...aft...then...next
     /// @{
-    CODE("donext",
-        if ((rs[-1] -= 1) >= 0) IP = JMPIP;                      // rs[-1]-=1 saved 2000ms/1M cycles
-        else { IP += sizeof(IU); rs.pop(); }),
     IMMD("for" ,    ADD_WORD(">r"); PUSH(XIP)),                  // for ( -- here )
     IMMD("next",    ADD_WORD("donext"); ADD_IU(POP())),          // next ( here -- )
     IMMD("aft",                                                  // aft ( here -- here there )
@@ -490,12 +497,6 @@ static Code prim[] PROGMEM = {
     // be careful with memory access, especially BYTE because
     // it could make access misaligned which slows the access speed by 2x
     //
-    CODE("c@",    IU w = POP(); PUSH(BYTE(w));),                 // w -- n
-    CODE("c!",    IU w = POP(); BYTE(w) = POP()),
-    CODE("c,",    DU n = POP(); ADD_BYTE(n)),
-    CODE("w@",    IU w = POP(); PUSH(HALF(w))),                  // w -- n
-    CODE("w!",    IU w = POP(); HALF(w) = POP()),
-    CODE("w,",    DU n = POP(); ADD_HALF(n)),
     CODE("@",     IU w = POP(); PUSH(CELL(w))),                  // w -- n
     CODE("!",     IU w = POP(); CELL(w) = POP();),               // n w --
     CODE(",",     DU n = POP(); ADD_DU(n)),
@@ -564,10 +565,10 @@ void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
     fout.str("");                            /// clean output buffer, ready for next run
     while (fin >> strbuf) {
         const char *idiom = strbuf.c_str();
-        printf("%s=>", idiom);
+        //printf("%s=>", idiom);
         int w = find(idiom);                 /// * search through dictionary
         if (w>=0) {                          /// * word found?
-            printf("%s %d\n", dict[w].name, w);
+            //printf("%s %d\n", dict[w].name, w);
             if (compile && !dict[w].immd) {  /// * in compile mode?
                 ADD_IU(w);                   /// * add found word to new colon word
             }
@@ -577,7 +578,7 @@ void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
         // try as a number
         char *p;
         int n = static_cast<int>(strtol(idiom, &p, base));
-        printf("%d\n", n);
+        //printf("%d\n", n);
         if (*p != '\0') {                    /// * not number
             fout << idiom << "? " << ENDL;   ///> display error prompt
             compile = false;                 ///> reset to interpreter mode
