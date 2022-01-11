@@ -44,6 +44,8 @@ cr .( example 4.	repeated patterns )
 
 variable width                  ( number of asterisks to print )
 
+: aa width @ for ." *" next ;
+
 : asterisks ( -- , print n asterisks on the screen, n=width )
         width @                 ( limit=width, initial index=0 )
         for ." *"               ( print one asterisk at a time )

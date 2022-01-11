@@ -584,6 +584,7 @@ cr .( example 15.	ascii character table )
         next
         drop ;
 
+table
 
 cr .( example 16.	random numbers )
 
