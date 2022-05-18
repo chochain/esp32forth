@@ -14,11 +14,20 @@
 ///
 /// control whether lambda capture parameter
 /// Note:
-///    LAMBDA_OK    0 cut 80ms/1M cycles
-///    RANGE_CHECK  0 cut 100ms/1M cycles
+///    LAMBDA_OK       0 cut 80ms/1M cycles
+///    RANGE_CHECK     0 cut 100ms/1M cycles
+///    INLINE            cut 545ms/1M cycles
 ///
 #define  LAMBDA_OK      0
 #define  RANGE_CHECK    0
+#define INLINE          __attribute__((always_inline))
+///
+/// memory block configuation
+///
+#define E4_SS_SZ        64
+#define E4_RS_SZ        64
+#define E4_DICT_SZ      2048
+#define E4_PMEM_SZ      (64*1024)
 ///
 /// logical units (instead of physical) for type check and portability
 ///
@@ -31,7 +40,6 @@ typedef uint8_t  U8;    // byte, unsigned character
 ///
 #define ALIGN(sz)       ((sz) + (-(sz) & 0x1))
 #define ALIGN16(sz)     ((sz) + (-(sz) & 0xf))
-#define INLINE          __attribute__((always_inline))
 ///
 /// array class template (so we don't have dependency on C++ STL)
 /// Note:
@@ -45,9 +53,12 @@ struct List {
     int idx = 0;        /// current index of array
     int max = 0;        /// high watermark for debugging
 
-    List()  { v = new T[N]; }      /// dynamically allocate array memory
-    ~List() { delete[] v;   }      /// free the memory
-    T& operator[](int i) INLINE { return i < 0 ? v[idx + i] : v[i]; }
+    List()  { v = N ? new T[N] : 0; }      /// dynamically allocate array memory
+    ~List() { if (N) delete[] v;   }       /// free the memory
+
+    List &operator=(T *a)   INLINE { v = a; return *this; }
+    T    &operator[](int i) INLINE { return i < 0 ? v[idx + i] : v[i]; }
+    
 #if RANGE_CHECK
     T pop()     INLINE {
         if (idx>0) return v[--idx];
@@ -126,10 +137,10 @@ struct Code {
 ///   * this makes IP increment by 2 instead of word size. If needed, it can be
 ///   * readjusted.
 ///
-List<DU,   64>      ss;   /// data stack, can reside in registers for some processors
-List<DU,   64>      rs;   /// return stack
-List<Code, 2048>    dict; /// fixed sized dictionary (RISC vs CISC)
-List<U8,   64*1024> pmem; /// parameter memory i.e. storage for all colon definitions
+List<DU,   ES_SS_SZ>   ss;   /// data stack, can reside in registers for some processors
+List<DU,   ES_RS_SZ>   rs;   /// return stack
+List<Code, E4_DICT_SZ> dict; /// fixed sized dictionary (RISC vs CISC)
+List<U8,   E4_PMEM_SZ> pmem; /// parameter memory i.e. storage for all colon definitions
 ///
 /// system variables
 ///
@@ -314,7 +325,7 @@ void mem_dump(IU p0, DU sz) {
 ///
 /// macros to reduce verbosity
 ///
-inline char *next_word()  { fin >> strbuf; return (char*)strbuf.c_str(); } // get next idiom
+inline char *next_idiom() { fin >> strbuf; return (char*)strbuf.c_str(); } // get next idiom
 inline char *scan(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
 inline DU   POP()         { DU n = top; top=ss.pop(); return n; }
 #define     PUSH(v)       { ss.push(top); top = v; }
@@ -438,7 +449,7 @@ static Code prim[] PROGMEM = {
     CODE(".r",      DU n = POP(); dot_r(n, POP())),
     CODE("u.r",     DU n = POP(); dot_r(n, abs(POP()))),
     CODE(".f",      DU n = POP(); fout << setprecision(n) << POP()),
-    CODE("key",     PUSH(next_word()[0])),
+    CODE("key",     PUSH(next_idiom()[0])),
     CODE("emit",    char b = (char)POP(); fout << b),
     CODE("space",   fout << " "),
     CODE("spaces",  for (DU n = POP(), i = 0; i < n; i++) fout << " "),
@@ -489,18 +500,18 @@ static Code prim[] PROGMEM = {
     /// @}
     /// @defgrouop Compiler ops
     /// @{
-    CODE(":", colon(next_word()); compile=true),
+    CODE(":", colon(next_idiom()); compile=true),
     IMMD(";", compile = false),
     CODE("create",
-         colon(next_word());                                 // create a new word on dictionary
+         colon(next_idiom());                                 // create a new word on dictionary
          add_iu(DOVAR)),                                     // dovar (+parameter field) 
     CODE("variable",                                         // create a variable
-         colon(next_word());                                 // create a new word on dictionary
+         colon(next_idiom());                                 // create a new word on dictionary
          DU n = 0;                                           // default value
          add_iu(DOVAR);                                      // dovar (+parameter field)
          add_du(n)),                                         // data storage (32-bit integer now)
     CODE("constant",                                         // create a constant
-         colon(next_word());                                 // create a new word on dictionary
+         colon(next_idiom());                                 // create a new word on dictionary
          add_iu(DOLIT);                                      // dovar (+parameter field)
          add_du(POP())),                                     // data storage (32-bit integer now)
     //
@@ -519,13 +530,13 @@ static Code prim[] PROGMEM = {
     CODE("exit",  IP = PFA(WP) + PFLEN(WP)),                 // quit current word execution
     CODE("exec",  CALL(POP())),                              // execute word
     CODE("create",
-        colon(next_word());                                  // create a new word on dictionary
+        colon(next_idiom());                                  // create a new word on dictionary
         add_iu(DOVAR)),                                      // dovar (+ parameter field)
     CODE("to",              // 3 to x                        // alter the value of a constant
-    	IU w = find(next_word());                            // to save the extra @ of a variable
+    	IU w = find(next_idiom());                            // to save the extra @ of a variable
 	    *(DU*)(PFA(w) + sizeof(IU)) = POP()),
 	CODE("is",              // ' y is x                      // alias a word
-		IU w = find(next_word());                            // can serve as a function pointer
+		IU w = find(next_idiom());                            // can serve as a function pointer
         dict[POP()].pfa = dict[w].pfa),                      // but might leave a dangled block
     CODE("[to]",            // : xx 3 [to] y ;               // alter constant in compile mode
         IU w = *(IU*)IP; IP += sizeof(IU);                   // fetch constant pfa from 'here'
@@ -536,14 +547,14 @@ static Code prim[] PROGMEM = {
     CODE("here",  PUSH(HERE)),
     CODE("ucase", ucase = POP()),
     CODE("words", words()),
-    CODE("'",     IU w = find(next_word()); PUSH(w)),
+    CODE("'",     IU w = find(next_idiom()); PUSH(w)),
     CODE(".s",    ss_dump()),
-    CODE("see",   IU w = find(next_word()); IU ip=0; see(&w, &ip)),
+    CODE("see",   IU w = find(next_idiom()); IU ip=0; see(&w, &ip)),
     CODE("dump",  DU n = POP(); IU a = POP(); mem_dump(a, n)),
     CODE("peek",  DU a = POP(); PUSH(PEEK(a))),
     CODE("poke",  DU a = POP(); POKE(a, POP())),
     CODE("forget",
-         IU w = find(next_word());
+         IU w = find(next_idiom());
          if (w<0) return;
          IU b = find("boot")+1;
          dict.clear(w > b ? w : b)),
