@@ -1,5 +1,10 @@
-/******************************************************************************/
-/* esp32Forth, Version 8 : for NodeMCU ESP32S                                 */
+///
+/// esp32Forth, Version 8 : for NodeMCU ESP32S
+/// benchmark: 1M test case
+///    1440ms Dr. Ting's orig/esp32forth_82
+///    1240ms ~/Download/forth/esp32/esp32forth8_exp9 
+///    1045ms orig/esp32forth8_1
+///     700ms + INLINE List methods
 /******************************************************************************/
 #include <stdint.h>     // uintxx_t
 #include <stdlib.h>     // strtol
@@ -9,11 +14,11 @@
 ///
 /// control whether lambda capture parameter
 /// Note:
-///    LAMBDA_CAP   0 cut 80ms/1M cycles
+///    LAMBDA_OK    0 cut 80ms/1M cycles
 ///    RANGE_CHECK  0 cut 100ms/1M cycles
 ///
-#define  RANGE_CHECK   0
-#define  LAMBDA_CAP    0
+#define  LAMBDA_OK      0
+#define  RANGE_CHECK    0
 ///
 /// logical units (instead of physical) for type check and portability
 ///
@@ -26,6 +31,7 @@ typedef uint8_t  U8;    // byte, unsigned character
 ///
 #define ALIGN(sz)       ((sz) + (-(sz) & 0x1))
 #define ALIGN16(sz)     ((sz) + (-(sz) & 0xf))
+#define INLINE          __attribute__((always_inline))
 ///
 /// array class template (so we don't have dependency on C++ STL)
 /// Note:
@@ -41,44 +47,37 @@ struct List {
 
     List()  { v = new T[N]; }      /// dynamically allocate array memory
     ~List() { delete[] v;   }      /// free the memory
-    T& operator[](int i)   { return i < 0 ? v[idx + i] : v[i]; }
+    T& operator[](int i) INLINE { return i < 0 ? v[idx + i] : v[i]; }
 #if RANGE_CHECK
-    T pop() {
+    T pop()     INLINE {
         if (idx>0) return v[--idx];
         throw "ERR: List empty";
     }
-    T push(T t) {
+    T push(T t) INLINE {
         if (idx<N) return v[max=idx++] = t;
         throw "ERR: List full";
     }
-#else
-    T pop()     { return v[--idx]; }
-    T push(T t) { return v[max=idx++] = t; }
+#else  // RANGE_CHECK
+    T pop()     INLINE { return v[--idx]; }
+    T push(T t) INLINE { return v[max=idx++] = t; }
 #endif // RANGE_CHECK
-    void push(T *a, int n)  { for (int i=0; i<n; i++) push(*(a+i)); }
-    void merge(List& a)     { for (int i=0; i<a.idx; i++) push(a[i]);}
-    void clear(int i=0)     { idx=i; }
+    void push(T *a, int n) INLINE { for (int i=0; i<n; i++) push(*(a+i)); }
+    void merge(List& a)    INLINE { for (int i=0; i<a.idx; i++) push(a[i]);}
+    void clear(int i=0)    INLINE { idx=i; }
 };
 ///
-/// functor implementation - for lambda support (without STL)
-///
-#if LAMBDA_CAP
-struct fop { virtual void operator()(IU) = 0; };
-template<typename F>
-struct XT : fop {           // universal functor
-    F fp;
-    XT(F &f) : fp(f) {}
-    void operator()(IU c) { fp(c); }
-};
-#else
-typedef void (*fop)();
-#endif // LAMBDA_CAP
-///
-/// universal Code class
+/// universal functor and Code class
 /// Note:
 ///   * 8-byte on 32-bit machine, 16-byte on 64-bit machine
 ///
-#if LAMBDA_CAP
+#if LAMBDA_OK
+struct fop { virtual void operator()(IU) = 0; };
+template<typename F>
+struct XT : fop {           // universal functor (no STD dependency)
+    F fp;
+    XT(F &f) : fp(f) {}
+    void operator()(IU c) INLINE { fp(c); }
+};
 struct Code {
     const char *name = 0;   /// name field
     union {                 /// either a primitive or colon word
@@ -97,7 +96,8 @@ struct Code {
     }
     Code() {}               /// create a blank struct (for initilization)
 };
-#else
+#else  // LAMBDA_OK
+typedef void (*fop)();      /// function pointer
 struct Code {
     const char *name = 0;   /// name field
     union {                 /// either a primitive or colon word
@@ -114,7 +114,7 @@ struct Code {
     }
     Code() {}               /// create a blank struct (for initilization)
 };
-#endif // LAMBDA_CAP
+#endif // LAMBDA_OK
 ///==============================================================================
 ///
 /// main storages in RAM
@@ -154,9 +154,6 @@ U8   *IP = PMEM0, *IP0 = PMEM0; /// current instruction pointer and cached base 
 #define SETJMP(a) (*(IU*)(PFA(-1) + (a)))   /** address offset for branching opcodes     */
 #define HERE      (pmem.idx)                /** current parameter memory index           */
 #define IPOFF     ((IU)(IP - PMEM0))        /** IP offset relative parameter memory root */
-#define CALL(w)                                     \
-    if (dict[w].def) nest(w);                       \
-    else (*(fop)(((uintptr_t)dict[w].xt)&~0x3))()
 ///==============================================================================
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
@@ -194,11 +191,11 @@ void colon(const char *name) {
     char *nfa = STR(HERE);                  // current pmem pointer
     int sz = STRLEN(name);                  // string length, aligned
     pmem.push((U8*)name,  sz);              // setup raw name field
-#if LAMBDA_CAP
+#if LAMBDA_OK
     Code c(nfa, [](int){});                 // create a new word on dictionary
-#else
+#else  // LAMBDA_OK
     Code c(nfa, NULL);
-#endif // LAMBDA_CAP
+#endif // LAMBDA_OK
     c.def = 1;                              // specify a colon word
     c.len = 0;                              // advance counter (by number of U16)
     c.pfa = HERE;                           // capture code field index
@@ -209,6 +206,9 @@ void colon(const char *name) {
 /// Note:
 ///   use local stack, 1070 => 1058, but used 64 bytes per call
 ///   use NOP opcode terminator, 1070 => 1099, but no need for ipx on stack
+#define CALL(w)                                     \
+    if (dict[w].def) nest(w);                       \
+    else (*(fop)(((uintptr_t)dict[w].xt)&~0x3))()
 void nest(IU c) {
     rs.push(IP - PMEM0); rs.push(WP);       /// * setup call frame
     IP0 = IP = PFA(WP=c);                   // CC: this takes 30ms/1K, need work
@@ -318,13 +318,13 @@ inline char *next_word()  { fin >> strbuf; return (char*)strbuf.c_str(); } // ge
 inline char *scan(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
 inline DU   POP()         { DU n = top; top=ss.pop(); return n; }
 #define     PUSH(v)       { ss.push(top); top = v; }
-#if LAMBDA_CAP
+#if LAMBDA_OK
 #define     CODE(s, g)    { s, [](int c){ g; }, 0 }
 #define     IMMD(s, g)    { s, [](int c){ g; }, 1 }
-#else
+#else  // LAMBDA_OK
 #define     CODE(s, g)    { s, []{ g; }, 0 }
 #define     IMMD(s, g)    { s, []{ g; }, 1 }
-#endif // LAMBDA_CAP
+#endif // LAMBDA_OK
 #define     BOOL(f)       ((f)?-1:0)
 ///
 /// global memory access macros
@@ -665,7 +665,7 @@ void forth_setup() {
     /// ForthVM initalization
     ///
     forth_init();
-//    forth_load("/load.txt");    // compile /data/load.txt
+    //forth_load("/load.txt");    // compile /data/load.txt
 
     mem_stat();
 }
