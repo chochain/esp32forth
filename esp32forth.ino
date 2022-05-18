@@ -137,10 +137,10 @@ struct Code {
 ///   * this makes IP increment by 2 instead of word size. If needed, it can be
 ///   * readjusted.
 ///
-List<DU,   ES_SS_SZ>   ss;   /// data stack, can reside in registers for some processors
-List<DU,   ES_RS_SZ>   rs;   /// return stack
-List<Code, E4_DICT_SZ> dict; /// fixed sized dictionary (RISC vs CISC)
-List<U8,   E4_PMEM_SZ> pmem; /// parameter memory i.e. storage for all colon definitions
+List<DU,   E4_SS_SZ>   ss;       /// data stack, can reside in registers for some processors
+List<DU,   E4_RS_SZ>   rs;       /// return stack
+List<Code, E4_DICT_SZ> dict;     /// fixed sized dictionary (RISC vs CISC)
+List<U8,   E4_PMEM_SZ> pmem;     /// parameter memory i.e. storage for all colon definitions
 ///
 /// system variables
 ///
