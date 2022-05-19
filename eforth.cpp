@@ -128,51 +128,54 @@ inline void PUSH(DU v)  { ss.push(top); top = v; }
 ///============================================================================
 ///
 /// Forth inner interpreter (handles a colon word)
-/// Note:
-///   use local stack, 1070 => 1058, but used 64 bytes per call
-///   use NOP opcode terminator, 1070 => 1099, but no need for ipx on stack
+///
 #define CALL(w) \
-    if (dict[w].def) { WP = w; IP = MEM0 + dict[w].pfa; nest(); } \
-    else (*(fop)(((UFP)dict[w].xt) & ~0x3))()
+    if (dict[w].def) { WP = w; IP = PFA(w); nest(); } \
+    else (*(fop)((UFP)dict[w].xt & ~0x3))()
 /*
-void nest(IU c) {
-    rs.push(IP - MEM0); rs.push(WP);        /// * setup call frame
-    IP0 = IP = PFA(WP=c);                   // CC: this takes 30ms/1K, need work
-    try {                                   // CC: is dict[c] kept in cache?
-        U8 *ipx = IP + PFLEN(c);            // CC: this saved 350ms/1M
-        while (IP < ipx) {                  /// * recursively call all children
-            IU c1 = *IP; IP += sizeof(IU);  // CC: cost of (ipx, c1) on statck?
-            CALL(c1);                       ///> execute child word
-        }                                   ///> can do IP++ if pmem unit is 16-bit
+ * recursive nest (deprecated by iterative version follows)
+ *
+void nest() {
+    while (*(IU*)IP) {                               /// * fetch till EXIT
+        if (*(IU*)IP & 1) {                          /// * a colon word?
+            rs.push(OFF(IP) + sizeof(IU));           /// * setup callframe
+            IP = MEM0 + (*(IU*)IP & ~0x1);           /// * fetch new instruction pointer
+            nest();                                  /// * execute child word recursively
+            IP = MEM0 + rs.pop();                    /// * restore callframe
+        }
+        else {                                       /// * is a primitive word
+            UFP xt = DICT0 + (*(IU*)IP & ~0x3);      /// * get function pointer
+            IP += sizeof(IU);                        /// * advance instruction pointer
+            (*(fop)xt)();                            /// * execute
+        }
     }
-    catch(...) {}                           ///> protect if any exeception
-    yield();                                ///> give other tasks some time
-    IP0 = PFA(WP = rs.pop());               /// * restore call frame
-    IP  = MEM0 + rs.pop();
+    yield();
 }
 */
+///
+/// Forth inner interpreter - iterative version
+///
+/// Note: use local stack, 840ms => 784ms, but allot 4*64 bytes extra
+///
 void nest() {
-    int dp = 0;                                      /// iterator depth control
+    static U8* _rs[E4_RS_SZ];                        /// * local stack (instead of global rs)
+    int dp = 0;                                      /// * iterator depth control
     while (dp >= 0) {
-        /// function core
-        auto ipx = *(IU*)IP;                         /// hopefully use register than cached line
-        while (ipx) {
-            if (ipx & 1) {
-                rs.push(WP);                         /// * setup callframe (ENTER)
-                rs.push(OFF(IP) + sizeof(IU));
+        IU ipx = *(IU*)IP;                           /// hopefully use register than cached line
+        while (ipx) {                                /// * fetch till EXIT
+            IP += sizeof(IU);                        /// * advance instruction pointer
+            if (ipx & 1) {                           /// * is colon word?
+                _rs[dp] = IP; 
+//              rs.push(OFF(IP));                    /// setup callframe
                 IP = MEM0 + (ipx & ~0x1);            /// word pfa (def masked)
                 dp++;
             }
-            else {
-                UFP xt = DICT0 + (ipx & ~0x3);       /// * function pointer
-                IP += sizeof(IU);                    /// advance to next pfa
-                (*(fop*)xt)();
-            }
+            else (*(fop)(DICT0 + (ipx & ~0x3)))();    /// * execute primitive word
             ipx = *(IU*)IP;
         }
         if (dp-- > 0) {                              /// check call depth
-            IP = MEM0 + rs.pop();                    /// * restore call frame (EXIT)
-            WP = rs.pop();
+            IP = _rs[dp];
+//          IP = MEM0 + rs.pop();                    /// * restore callframe (EXIT)
         }
         yield();                                     ///> give other tasks some time
     }
@@ -505,6 +508,7 @@ void forth_init() {
     LOGF("dict0=");         LOGX(DICT0);
     LOGF(", sizeof(Code)="); LOG(sizeof(Code));
     LOGF("\n");
+    /*
     for (int i=0; i<PSZ; i++) {
         Code &c = dict[i];
         LOG(i);
@@ -515,6 +519,7 @@ void forth_init() {
         LOG(" ");        LOG(c.name);
         LOGF("\n");
     }                                        /// searching both spaces
+    */
 }
 ///
 /// outer interpreter
@@ -526,10 +531,10 @@ void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
     fout.str("");                            /// clean output buffer, ready for next run
     while (fin >> strbuf) {
         const char *idiom = strbuf.c_str();
-        //printf("%s=>", idiom);
+        // LOGF("find("); LOG(idiom); LOGF(") => ");
         int w = find(idiom);                 /// * search through dictionary
         if (w>=0) {                          /// * word found?
-            //printf("%s %d\n", dict[w].name, w);
+            // LOG(dict[w].name); LOG(" "); LOG(w); LOGF("\n");
             if (compile && !dict[w].immd) {  /// * in compile mode?
                 add_w(w);                    /// * add found word to new colon word
             }
@@ -539,7 +544,7 @@ void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
         // try as a number
         char *p;
         int n = static_cast<int>(strtol(idiom, &p, base));
-        //printf("%d\n", n);
+        // LOG(n); LOGF("\n");
         if (*p != '\0') {                    /// * not number
             fout << idiom << "? " << ENDL;   ///> display error prompt
             compile = false;                 ///> reset to interpreter mode
