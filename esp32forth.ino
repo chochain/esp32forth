@@ -16,6 +16,8 @@
 const char *WIFI_SSID = "Frontier7008";
 const char *WIFI_PASS = "8551666595";
 
+ForthVM *vm = new ForthVM();
+
 static const char *HTML_INDEX PROGMEM = R"XX(
 HTTP/1.1 200 OK
 Content-type:text/html
@@ -25,7 +27,7 @@ Content-type:text/html
 </head>
 <body>
     <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
-         background-color:#f8f0f0;'>esp32forth v8</div>
+         background-color:#f8f0f0;'>esp32forth v8.1</div>
     <textarea id='tib' style='height:600px;width:400px;'
         onkeydown='if (13===event.keyCode) forth()'>words</textarea>
 </body>
@@ -65,8 +67,6 @@ Content-type:text/plain
 Transfer-Encoding: chunked
 
 )XX";
-
-ForthVM *vm = new ForthVM();
 
 namespace ForthServer {
     WiFiServer server;
@@ -164,11 +164,13 @@ void setup() {
     Serial.begin(115200);
     delay(100);
 
-    robot_setup();
-    ForthServer::setup(WIFI_SSID, WIFI_PASS);
-    vm->init();
     console_cmd.reserve(256);
-    LOGF("\nesp32forth8\n");
+    robot_setup();
+    
+    ForthServer::setup(WIFI_SSID, WIFI_PASS);
+    
+    vm->init();
+    vm->version();
 }
 
 void loop(void) {
