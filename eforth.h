@@ -29,8 +29,10 @@ typedef uintptr_t UFP;   // function pointer
 ///
 /// alignment macros
 ///
-#define ALIGN(sz)       ((sz) + (-(sz) & 0x1))
+#define ALIGN2(sz)      ((sz) + (-(sz) & 0x1))
 #define ALIGN16(sz)     ((sz) + (-(sz) & 0xf))
+#define ALIGN(sz)       ALIGN2(sz)
+#define STRLEN(s)       (ALIGN(strlen(s)+1))      /** calculate string size with alignment     */
 ///
 /// Arduino specific macros
 ///
@@ -111,6 +113,9 @@ struct Code {
 #define CODE(s, g) { s, [](int c){ g; }, 0 }
 #define IMMD(s, g) { s, [](int c){ g; }, 1 }
 #else  // LAMBDA_OK
+///
+/// a lambda without capture can degenerate into a function pointer
+///
 typedef void (*fop)();      /// function pointer
 struct Code {
     const char *name = 0;   /// name field
@@ -131,7 +136,9 @@ struct Code {
 #define CODE(s, g) { s, []{ g; }, 0 }
 #define IMMD(s, g) { s, []{ g; }, 1 }
 #endif // LAMBDA_OK
-
+///
+/// proxy class for ESP32
+///
 class ForthVM {
 public:
     void   init();
