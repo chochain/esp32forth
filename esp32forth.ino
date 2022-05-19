@@ -12,6 +12,12 @@
 #include <exception>    // try...catch, throw (disable for less capable MCU)
 #include "SPIFFS.h"     // flash memory
 ///
+/// version info
+///
+#define APP_NAME         "esp32forth"
+#define MAJOR_VERSION    "8"
+#define MINOR_VERSION    "1"
+///
 /// control whether lambda capture parameter
 /// Note:
 ///    LAMBDA_OK       0 cut 80ms/1M cycles
@@ -31,10 +37,11 @@
 ///
 /// logical units (instead of physical) for type check and portability
 ///
-typedef uint16_t IU;    // instruction pointer unit
-typedef int32_t  DU;    // data unit
-typedef uint16_t U16;   // unsigned 16-bit integer
-typedef uint8_t  U8;    // byte, unsigned character
+typedef uint16_t  IU;    // instruction pointer unit
+typedef int32_t   DU;    // data unit
+typedef uint16_t  U16;   // unsigned 16-bit integer
+typedef uint8_t   U8;    // byte, unsigned character
+typedef uintptr_t UFP;   // function pointer
 ///
 /// alignment macros
 ///
@@ -141,6 +148,8 @@ List<DU,   E4_SS_SZ>   ss;       /// data stack, can reside in registers for som
 List<DU,   E4_RS_SZ>   rs;       /// return stack
 List<Code, E4_DICT_SZ> dict;     /// fixed sized dictionary (RISC vs CISC)
 List<U8,   E4_PMEM_SZ> pmem;     /// parameter memory i.e. storage for all colon definitions
+U8  *MEM0 = &pmem[0];            /// based of parameter memory block
+UFP DICT0;                       /// base of dictionary
 ///
 /// system variables
 ///
@@ -148,8 +157,7 @@ bool compile = false;
 DU   top = -1, base = 10;
 DU   ucase = 1;                 /// case sensitivity control
 IU   WP = 0;                    /// current word pointer
-U8   *PMEM0 = &pmem[0];         /// cached base memory address
-U8   *IP = PMEM0, *IP0 = PMEM0; /// current instruction pointer and cached base pointer
+U8   *IP = MEM0, *IP0 = MEM0;   /// current instruction pointer and cached base pointer
 ///
 /// macros to abstract dict and pmem physical implementation
 /// Note:
@@ -164,7 +172,7 @@ U8   *IP = PMEM0, *IP0 = PMEM0; /// current instruction pointer and cached base 
 #define JMPIP     (IP0 + *(IU*)IP)          /** branching target address                 */
 #define SETJMP(a) (*(IU*)(PFA(-1) + (a)))   /** address offset for branching opcodes     */
 #define HERE      (pmem.idx)                /** current parameter memory index           */
-#define IPOFF     ((IU)(IP - PMEM0))        /** IP offset relative parameter memory root */
+#define IPOFF     ((IU)(IP - MEM0))         /** IP offset relative parameter memory root */
 ///==============================================================================
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
@@ -219,9 +227,9 @@ void colon(const char *name) {
 ///   use NOP opcode terminator, 1070 => 1099, but no need for ipx on stack
 #define CALL(w)                                     \
     if (dict[w].def) nest(w);                       \
-    else (*(fop)(((uintptr_t)dict[w].xt)&~0x3))()
+    else (*(fop)(((UFP)dict[w].xt)&~0x3))()
 void nest(IU c) {
-    rs.push(IP - PMEM0); rs.push(WP);       /// * setup call frame
+    rs.push(IP - MEM0); rs.push(WP);        /// * setup call frame
     IP0 = IP = PFA(WP=c);                   // CC: this takes 30ms/1K, need work
     try {                                   // CC: is dict[c] kept in cache?
         U8 *ipx = IP + PFLEN(c);            // CC: this saved 350ms/1M
@@ -233,7 +241,7 @@ void nest(IU c) {
     catch(...) {}                           ///> protect if any exeception
     yield();                                ///> give other tasks some time
     IP0 = PFA(WP = rs.pop());               /// * restore call frame
-    IP  = PMEM0 + rs.pop();
+    IP  = MEM0 + rs.pop();
 }
 ///==============================================================================
 ///
@@ -340,8 +348,8 @@ inline DU   POP()         { DU n = top; top=ss.pop(); return n; }
 ///
 /// global memory access macros
 ///
-#define     PEEK(a)    (DU)(*(DU*)((uintptr_t)(a)))
-#define     POKE(a, c) (*(DU*)((uintptr_t)(a))=(DU)(c))
+#define     PEEK(a)    (DU)(*(DU*)((UFP)(a)))
+#define     POKE(a, c) (*(DU*)((UFP)(a))=(DU)(c))
 ///================================================================================
 ///
 /// primitives (ROMable)
@@ -699,7 +707,7 @@ Content-type:text/html
 </head>
 <body>
     <div id='log' style='float:left;overflow:auto;height:600px;width:600px;
-         background-color:#f8f0f0;'>ESP32Forth v8</div>
+         background-color:#f8f0f0;'>esp32forth v8</div>
     <textarea id='tib' style='height:600px;width:400px;'
         onkeydown='if (13===event.keyCode) forth()'>words</textarea>
 </body>
