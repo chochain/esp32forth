@@ -43,6 +43,7 @@ typedef uintptr_t UFP;   // function pointer
 ///
 #define LOGF(s)  Serial.print(F(s))
 #define LOG(v)   Serial.print(v)
+#define LOGX(v)  Serial.print(v, HEX)
 ///
 /// array class template (so we don't have dependency on C++ STL)
 /// Note:
