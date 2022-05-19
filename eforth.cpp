@@ -63,6 +63,17 @@ U8   *IP = MEM0, *IP0 = MEM0;   /// current instruction pointer and cached base 
 ///
 /// dictionary search functions - can be adapted for ROM+RAM
 ///
+int pfa2word(U8 *ip) {
+    IU   ipx = *(IU*)ip;
+    U8   *xt = (U8*)XT(ipx);
+    for (int i = dict.idx - 1; i >= 0; --i) {
+        if (ipx & 1) {
+            if (dict[i].pfa == (ipx & ~1)) return i;
+        }
+        else if ((U8*)dict[i].xt == xt) return i;
+    }
+    return -1;
+}
 inline int streq(const char *s1, const char *s2) {
     return ucase ? strcasecmp(s1, s2)==0 : strcmp(s1, s2)==0;
 }
@@ -71,14 +82,6 @@ int find(const char *s) {
         if (streq(s, dict[i].name)) return i;
     }
     return -1;
-}
-///
-/// inline functions to 'comma' object into pmem
-///
-inline void add_iu(IU i)   { pmem.push((U8*)&i, sizeof(IU)); XIP+=sizeof(IU);  }  /** add an instruction into pmem */
-inline void add_du(DU v)   { pmem.push((U8*)&v, sizeof(DU)), XIP+=sizeof(DU);  }  /** add a cell into pmem         */
-inline void add_str(const char *s) {                                              /** add a string to pmem         */
-    int sz = STRLEN(s); pmem.push((U8*)s,  sz); XIP += sz;
 }
 ///==============================================================================
 ///
@@ -106,6 +109,17 @@ void colon(const char *name) {
     c.pfa = HERE;                           // capture code field index
     dict.push(c);                           // deep copy Code struct into dictionary
 };
+inline void add_iu(IU i)   { pmem.push((U8*)&i, sizeof(IU)); XIP+=sizeof(IU);  }  /** add an instruction into pmem */
+inline void add_du(DU v)   { pmem.push((U8*)&v, sizeof(DU)), XIP+=sizeof(DU);  }  /** add a cell into pmem         */
+inline void add_str(const char *s) {                                              /** add a string to pmem         */
+    int sz = STRLEN(s); pmem.push((U8*)s,  sz); XIP += sz;
+}
+void  add_w(IU w) {
+    Code *c  = &dict[w];
+    IU   ipx = c->def ? (c->pfa | 1) : (IU)((UFP)c->xt - DICT0);
+    add_iu(ipx);
+}
+///============================================================================
 ///
 /// Forth inner interpreter (handles a colon word)
 /// Note:
@@ -147,10 +161,13 @@ string strbuf;          // input string buffer
 void (*fout_cb)(int, const char*);  // forth output callback function
 
 ///================================================================================
-/// debug functions
 ///
-void dot_r(int n, int v) { fout << setw(n) << setfill(' ') << v; }
-void to_s(IU c) {
+/// IO & debug functions
+///
+inline char *next_idiom() { fin >> strbuf; return (char*)strbuf.c_str(); } // get next idiom
+inline char *scan(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
+inline void dot_r(int n, int v) { fout << setw(n) << setfill(' ') << v; }
+inline void to_s(IU c) {
     fout << dict[c].name << " " << c << (dict[c].immd ? "* " : " ");
 }
 ///
@@ -215,8 +232,6 @@ void mem_dump(IU p0, DU sz) {
 ///
 /// macros to reduce verbosity
 ///
-inline char *next_idiom() { fin >> strbuf; return (char*)strbuf.c_str(); } // get next idiom
-inline char *scan(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
 inline DU   POP()         { DU n = top; top=ss.pop(); return n; }
 #define     PUSH(v)       { ss.push(top); top = v; }
 #define     BOOL(f)       ((f)?-1:0)
