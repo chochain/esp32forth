@@ -108,6 +108,8 @@ struct Code {
     }
     Code() {}               /// create a blank struct (for initilization)
 };
+#define CODE(s, g) { s, [](int c){ g; }, 0 }
+#define IMMD(s, g) { s, [](int c){ g; }, 1 }
 #else  // LAMBDA_OK
 typedef void (*fop)();      /// function pointer
 struct Code {
@@ -126,13 +128,15 @@ struct Code {
     }
     Code() {}               /// create a blank struct (for initilization)
 };
+#define CODE(s, g) { s, []{ g; }, 0 }
+#define IMMD(s, g) { s, []{ g; }, 1 }
 #endif // LAMBDA_OK
 
 class ForthVM {
 public:
-    void init();
-    void outer(const char *cmd, void(*callback)(int, const char*));
-
-    void mem_stat();
+    void   init();
+    void   outer(const char *cmd, void(*callback)(int, const char*));
+    void   version();
+    void   mem_stat();
 };
 #endif // __ESP32FORTH_SRC_EFORTH_H

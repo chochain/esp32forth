@@ -219,13 +219,6 @@ inline char *next_idiom() { fin >> strbuf; return (char*)strbuf.c_str(); } // ge
 inline char *scan(char c) { getline(fin, strbuf, c); return (char*)strbuf.c_str(); }
 inline DU   POP()         { DU n = top; top=ss.pop(); return n; }
 #define     PUSH(v)       { ss.push(top); top = v; }
-#if LAMBDA_OK
-#define     CODE(s, g)    { s, [](int c){ g; }, 0 }
-#define     IMMD(s, g)    { s, [](int c){ g; }, 1 }
-#else  // LAMBDA_OK
-#define     CODE(s, g)    { s, []{ g; }, 0 }
-#define     IMMD(s, g)    { s, []{ g; }, 1 }
-#endif // LAMBDA_OK
 #define     BOOL(f)       ((f)?-1:0)
 ///
 /// global memory access macros
@@ -516,24 +509,6 @@ void forth_outer(const char *cmd, void(*callback)(int, const char*)) {
 /// ForthVM front-end handlers
 ///==========================================================================
 ///
-/// memory statistics dump - for heap and stack debugging
-///
-static void mem_stat() {
-    LOGF("Core:");           LOG(xPortGetCoreID());
-    LOGF(" heap[maxblk=");   LOG(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    LOGF(", avail=");        LOG(heap_caps_get_free_size(MALLOC_CAP_8BIT));
-    LOGF(", ss_max=");       LOG(ss.max);
-    LOGF(", rs_max=");       LOG(rs.max);
-    LOGF(", pmem=");         LOG(HERE);
-    LOGF("], lowest[heap="); LOG(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
-    LOGF(", stack=");        LOG(uxTaskGetStackHighWaterMark(NULL));
-    LOGF("]\n");
-    if (!heap_caps_check_integrity_all(true)) {
-//        heap_trace_dump();     // dump memory, if we have to
-        abort();                 // bail, on any memory error
-    }
-}
-///
 /// Forth bootstrap loader (from Flash)
 ///
 static int forth_load(const char *fname) {
@@ -555,19 +530,40 @@ static int forth_load(const char *fname) {
     SPIFFS.end();
     return 0;
 }
-
-void forth_setup() {
-    ///
-    /// ForthVM initalization
-    ///
+///
+/// ForthVM initalization
+///
+void ForthVM::init() {
     forth_init();
     //forth_load("/load.txt");    // compile /data/load.txt
 
     mem_stat();
 }
-
-void ForthVM::init() { forth_setup(); }
 void ForthVM::outer(const char *cmd, void(*callback)(int, const char*)) {
     forth_outer(cmd, callback);
 }
-void ForthVM::mem_stat() { mem_stat(); }
+void ForthVM::version() {
+    LOGF("\n");
+    LOGF(APP_NAME);      LOGF(" ");
+    LOGF(MAJOR_VERSION); LOGF(".");
+    LOGF(MINOR_VERSION);
+    LOGF("\n");
+}
+///
+/// memory statistics dump - for heap and stack debugging
+///
+void ForthVM::mem_stat() {
+    LOGF("Core:");           LOG(xPortGetCoreID());
+    LOGF(" heap[maxblk=");   LOG(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    LOGF(", avail=");        LOG(heap_caps_get_free_size(MALLOC_CAP_8BIT));
+    LOGF(", ss_max=");       LOG(ss.max);
+    LOGF(", rs_max=");       LOG(rs.max);
+    LOGF(", pmem=");         LOG(HERE);
+    LOGF("], lowest[heap="); LOG(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    LOGF(", stack=");        LOG(uxTaskGetStackHighWaterMark(NULL));
+    LOGF("]\n");
+    if (!heap_caps_check_integrity_all(true)) {
+//        heap_trace_dump();     // dump memory, if we have to
+        abort();                 // bail, on any memory error
+    }
+}
