@@ -1,22 +1,19 @@
 ///
-/// esp32Forth, Version 8 : for NodeMCU ESP32S
+/// esp32forth, Version 8 : for NodeMCU ESP32S
+///
 /// benchmark: 1M test case
 ///    1440ms Dr. Ting's orig/esp32forth_82
-///    1240ms ~/Download/forth/esp32/esp32forth8_exp9 
+///    1240ms ~/Download/forth/esp32/esp32forth8_exp9
 ///    1045ms orig/esp32forth8_1
 ///     700ms + INLINE List methods
 ///==========================================================================
 /// ESP32 Web Serer connection and index page
 ///==========================================================================
 #include <WiFi.h>
-#include "eforth.h"
+#include "src/ceforth.h"
 
-//const char *WIFI_SSID = "Sonic-6af4";
-//const char *WIFI_PASS = "7b369c932f";
 const char *WIFI_SSID = "Frontier7008";
 const char *WIFI_PASS = "8551666595";
-
-ForthVM *vm = new ForthVM();
 
 static const char *HTML_INDEX PROGMEM = R"XX(
 HTTP/1.1 200 OK
@@ -68,6 +65,7 @@ Transfer-Encoding: chunked
 
 )XX";
 
+ForthVM vm;                   /// instantiate a ForthVM proxy object
 namespace ForthServer {
     WiFiServer server;
     WiFiClient client;
@@ -104,7 +102,7 @@ namespace ForthServer {
             if (http_req.startsWith("---CMD")) break;
             if (http_req.length() > 0) {
                 Serial.println(http_req);           /// echo on console
-                vm->outer(http_req.c_str(), send_chunk);
+                vm.outer(http_req.c_str(), send_chunk);
             }
         }
         send_chunk(0, "\r\n");                      /// close HTTP chunk stream
@@ -166,11 +164,14 @@ void setup() {
 
     console_cmd.reserve(256);
     robot_setup();
-    
+
     ForthServer::setup(WIFI_SSID, WIFI_PASS);
-    
-    vm->init();
-    vm->version();
+
+    vm.init();
+    // vm.dict_dump();
+
+    vm.mem_stat();
+    LOG(vm.version());
 }
 
 void loop(void) {
@@ -185,8 +186,8 @@ void loop(void) {
     if (Serial.available()) {
         console_cmd = Serial.readString();
         LOG(console_cmd);
-        vm->outer(console_cmd.c_str(), send_to_con);
-        vm->mem_stat();
+        vm.outer(console_cmd.c_str(), send_to_con);
+        vm.mem_stat();
         delay(2);
     }
 }
